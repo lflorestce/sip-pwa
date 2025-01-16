@@ -29,33 +29,35 @@ const CallComponent = () => {
   const [isFlipped, setIsFlipped] = useState(false);
 
   useEffect(() => {
-    initializeSIPClient();
-    initializeAudio();
+    if (typeof window !== "undefined") {
+      initializeSIPClient();
+      initializeAudio();
 
-    registerIncomingCallHandler((session) => {
-      setIncomingCall(session);
-    });
+      registerIncomingCallHandler((session) => {
+        setIncomingCall(session);
+      });
 
-    // Load beep sound
-    const beep = new Audio('/sounds/beep.mp3');
-    setBeepSound(beep);
+      // Load beep sound
+      const beep = new Audio('/sounds/beep.mp3');
+      setBeepSound(beep);
 
-    // Extract the phone number from URL query parameters
-    const params = new URLSearchParams(window.location.search);
-    const number = params.get("number");
-    setPhoneNumber(number || "");
+      // Extract the phone number from URL query parameters
+      const params = new URLSearchParams(window.location.search);
+      const number = params.get("number");
+      setPhoneNumber(number || "");
 
-    if (number) {
-      const searchContacts = async () => {
-        console.log("Fetching contacts for", number);
-        const data = await fetchContactData(number);
-        if (data && data.length) {
-          setContacts(data);
-        } else {
-          console.log("No contacts found.");
-        }
-      };
-      searchContacts();
+      if (number) {
+        const searchContacts = async () => {
+          console.log("Fetching contacts for", number);
+          const data = await fetchContactData(number);
+          if (data && data.length) {
+            setContacts(data);
+          } else {
+            console.log("No contacts found.");
+          }
+        };
+        searchContacts();
+      }
     }
   }, []);
 
