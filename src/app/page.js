@@ -9,35 +9,39 @@ export default function Home() {
   const router = useRouter();
 
   useEffect(() => {
-    // Check if the user is logged in by verifying the authToken
-    const authToken = localStorage.getItem("authToken");
-    if (!authToken) {
-      // If no token, redirect to the login page
-      router.push("/auth/login");
-    }
-    // Optionally, you could add further token validation here, such as decoding the JWT.
+    if (typeof window !== "undefined") {
+      // Check if the user is logged in by verifying the authToken
+      const authToken = localStorage.getItem("authToken");
+      if (!authToken) {
+        // If no token, redirect to the login page
+        router.push("/auth/login");
+      }
+      // Optionally, you could add further token validation here, such as decoding the JWT.
 
-    // Register the service worker
-    if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker
-          .register("/service-worker.js")
-          .then((registration) => {
-            console.log("ServiceWorker registration successful with scope: ", registration.scope);
-          })
-          .catch((error) => {
-            console.log("ServiceWorker registration failed: ", error);
-          });
-      });
+      // Register the service worker
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker
+            .register("/service-worker.js")
+            .then((registration) => {
+              console.log("ServiceWorker registration successful with scope: ", registration.scope);
+            })
+            .catch((error) => {
+              console.log("ServiceWorker registration failed: ", error);
+            });
+        });
+      }
     }
   }, [router]);
 
   const handleLogout = () => {
-    // Clear the token from localStorage
-    localStorage.removeItem("authToken");
+    if (typeof window !== "undefined") {
+      // Clear the token from localStorage
+      localStorage.removeItem("authToken");
 
-    // Redirect the user to the login page
-    router.push("/auth/login");
+      // Redirect the user to the login page
+      router.push("/auth/login");
+    }
   };
 
   return (
