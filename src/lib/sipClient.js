@@ -1,17 +1,6 @@
 import JsSIP from 'jssip';
 import axios from 'axios';
 
-// Retrieve user details from local storage
-const userDetails = JSON.parse(localStorage.getItem('userDetails'));
-
-if (!userDetails) {
-  // Redirect to login page if user details are not found
-  window.location.href = '/login';
-  throw new Error('User details not found in local storage. Redirecting to login page.');
-}
-
-console.log('User details:', userDetails); // Log user details to verify
-
 let ua;
 let session;
 let isClientInitialized = false;
@@ -23,26 +12,93 @@ let seconds = 0;
 let minutes = 0;
 let starttime;
 let ringtone;
+let currentGhContact = null;
+let callAttemptStartedAt;
 
-const configuration = {
-  uri: `sip:${userDetails.WebRTCName}@sip.tcesecure.com`,
-  password: userDetails.WebRTCPw,
-  session_timers: false,
-  register: true,
-  traceSip: true,
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'turn:turn.relay.metered.ca:443', username: userDetails.WebRTCName, credential: userDetails.WebRTCPw },
-    { urls: 'turn:turn.relay.metered.ca:443?transport=udp', username: userDetails.WebRTCName, credential: userDetails.WebRTCPw },
-    { urls: 'turn:turn.relay.metered.ca:443?transport=tcp', username: userDetails.WebRTCName, credential: userDetails.WebRTCPw },
-  ],
-  sessionDescriptionHandlerFactoryOptions: {
-    peerConnectionConfiguration: {
-      bundlePolicy: 'max-bundle',
-      iceGatheringTimeout: 1000,
-    }
-  }
+const sipEventHandlers = {
+  incomingCall: null,
+  callProgress: null,
+  callConfirmed: null,
+  callEnded: null,
+  callFailed: null,
+  registrationState: null,
 };
+
+function getUserDetails() {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  if (window.__TCE_USER_DETAILS__) {
+    return window.__TCE_USER_DETAILS__;
+  }
+
+  try {
+    const raw = localStorage.getItem('userDetails');
+    if (!raw) {
+      return null;
+    }
+
+    return JSON.parse(raw);
+  } catch (error) {
+    console.error('Unable to parse stored user details:', error);
+    return null;
+  }
+}
+
+export function hasUserDetails() {
+  return !!getUserDetails();
+}
+
+function ensureUserDetails({ redirectToLogin = true } = {}) {
+  const details = getUserDetails();
+
+  if (!details) {
+    if (redirectToLogin && typeof window !== 'undefined') {
+      window.location.href = '/auth/login';
+    }
+
+    throw new Error('User details not found in local storage.');
+  }
+
+  return details;
+}
+
+function getConfiguration() {
+  const userDetails = ensureUserDetails();
+
+  return {
+    uri: `sip:${userDetails.WebRTCName}@sip.tcesecure.com`,
+    password: userDetails.WebRTCPw,
+    session_timers: false,
+    register: true,
+    traceSip: true,
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      {
+        urls: 'turn:turn.relay.metered.ca:443',
+        username: userDetails.WebRTCName,
+        credential: userDetails.WebRTCPw,
+      },
+      {
+        urls: 'turn:turn.relay.metered.ca:443?transport=udp',
+        username: userDetails.WebRTCName,
+        credential: userDetails.WebRTCPw,
+      },
+      {
+        urls: 'turn:turn.relay.metered.ca:443?transport=tcp',
+        username: userDetails.WebRTCName,
+        credential: userDetails.WebRTCPw,
+      },
+    ],
+    sessionDescriptionHandlerFactoryOptions: {
+      peerConnectionConfiguration: {
+        bundlePolicy: 'max-bundle',
+        iceGatheringTimeout: 1000,
+      },
+    },
+  };
+}
 
 export function initializeAudio() {
   ringtone = new Audio('/sounds/ringtone.mp3');
@@ -50,7 +106,9 @@ export function initializeAudio() {
 }
 
 export function playRingtone() {
-  ringtone?.play();
+  ringtone?.play().catch((error) => {
+    console.warn('Unable to play ringtone automatically:', error);
+  });
 }
 
 export function stopRingtone() {
@@ -58,41 +116,56 @@ export function stopRingtone() {
   if (ringtone) ringtone.currentTime = 0;
 }
 
+export function registerSipEventHandlers(handlers = {}) {
+  Object.assign(sipEventHandlers, handlers);
+}
+
 export function answerCall(incomingSession) {
-  if (incomingSession) {
-    stopRingtone();
-    session = incomingSession;
+  if (!incomingSession) return;
+
+  stopRingtone();
+  session = incomingSession;
+  starttime = new Date();
+
+  try {
     session.answer({
       mediaConstraints: { audio: true, video: false },
-      pcConfig: { iceServers: configuration.iceServers },
+      pcConfig: { iceServers: getConfiguration().iceServers },
     });
+
     attachStream(session);
-    registerSessionEvents(session);
+  } catch (error) {
+    console.error('Failed to answer incoming call:', error);
   }
 }
 
 export function rejectCall(incomingSession) {
-  if (incomingSession) {
-    stopRingtone();
+  if (!incomingSession) return;
+
+  stopRingtone();
+
+  try {
     incomingSession.terminate();
+  } catch (error) {
+    console.warn('Failed to reject incoming call cleanly:', error);
   }
 }
 
-export function registerIncomingCallHandler(handler) {
-  if (!ua) return;
-  
-  ua.on('newRTCSession', (event) => {
-    if (event.session.direction === 'incoming') {
-      playRingtone();
-      handler(event.session);
-    }
-  });
-}
-
-// Initialize SIP client
 export function initializeSIPClient() {
-  if (isClientInitialized) return;
+  if (ua) return true;
 
+  const details = getUserDetails();
+  if (!details) {
+    console.warn('SIP initialization skipped: no stored user details in this profile yet.');
+    sipEventHandlers.registrationState?.({
+      connected: false,
+      registered: false,
+      unauthenticated: true,
+    });
+    return false;
+  }
+
+  const configuration = getConfiguration();
   const socket = new JsSIP.WebSocketInterface('wss://sip.tcesecure.com:8089/ws');
   configuration.sockets = [socket];
   ua = new JsSIP.UA(configuration);
@@ -100,69 +173,98 @@ export function initializeSIPClient() {
   ua.on('connected', () => {
     console.log('SIP connected');
     isClientInitialized = true;
+    sipEventHandlers.registrationState?.({
+      connected: true,
+      registered: isRegistered,
+    });
   });
 
   ua.on('disconnected', () => {
     console.log('SIP disconnected');
     isClientInitialized = false;
     isRegistered = false;
+    sipEventHandlers.registrationState?.({
+      connected: false,
+      registered: false,
+    });
   });
 
   ua.on('registered', () => {
     console.log('SIP registered');
     isRegistered = true;
+    sipEventHandlers.registrationState?.({
+      connected: true,
+      registered: true,
+    });
     processQueuedCalls();
   });
 
   ua.on('registrationFailed', (e) => {
     console.error('SIP registration failed:', e.cause);
     isRegistered = false;
+    sipEventHandlers.registrationState?.({
+      connected: isClientInitialized,
+      registered: false,
+      cause: e.cause,
+    });
   });
 
   ua.on('newRTCSession', (data) => {
-    session = data.session;
-    if (session.direction === 'incoming') {
-      console.log('Incoming call from:', session.remote_identity.uri.toString());
+    const newSession = data.session;
+    session = newSession;
+
+    registerSessionEvents(newSession);
+
+    if (newSession.direction === 'incoming') {
+      console.log('Incoming call from:', newSession.remote_identity?.uri?.toString?.() || 'unknown');
       playRingtone();
+
+      sipEventHandlers.incomingCall?.({
+        session: newSession,
+        from: newSession.remote_identity?.uri?.user || '',
+        rawUri: newSession.remote_identity?.uri?.toString?.() || '',
+      });
     }
-    registerSessionEvents(session);
   });
 
   ua.start();
+  return true;
 }
 
-// Queue calls until SIP client is registered
 function queueCall(target) {
   return new Promise((resolve) => {
     callQueue.push({ target, resolve });
   });
 }
 
-// Process queued calls when SIP client is registered
 function processQueuedCalls() {
   while (callQueue.length > 0) {
     const { target, resolve } = callQueue.shift();
-    makeCall(target).then(resolve);
+    makeCall(target).then(resolve).catch((error) => {
+      console.error('Queued call failed:', error);
+      resolve();
+    });
   }
 }
 
-// Format phone number to E.164, assuming U.S. numbers default to +1
 function formatToE164(number) {
   if (!number) {
-    console.warn("Attempted to format an undefined number to E.164.");
-    return "";
+    console.warn('Attempted to format an undefined number to E.164.');
+    return '';
   }
-  let formattedNumber = number.replace(/\D/g, ''); // Remove non-numeric characters
+
+  let formattedNumber = String(number).replace(/\D/g, '');
+
   if (!formattedNumber.startsWith('1')) {
-    formattedNumber = '1' + formattedNumber; // Assume U.S. if no country code
+    formattedNumber = '1' + formattedNumber;
   }
+
   return `+${formattedNumber}`;
 }
 
-// Make a call
-export async function makeCall(target) {
+export async function makeCall(target, ghContact = null) {
   if (!target) {
-    console.warn("No target number provided to makeCall.");
+    console.warn('No target number provided to makeCall.');
     return;
   }
 
@@ -173,29 +275,55 @@ export async function makeCall(target) {
   console.log(`Attempting to call: ${sipUri}`);
 
   starttime = new Date();
+  callAttemptStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  currentGhContact = ghContact;
 
   try {
     session = ua.call(sipUri, {
       mediaConstraints: { audio: true, video: false },
-      pcConfig: { iceServers: configuration.iceServers },
+      pcConfig: { iceServers: getConfiguration().iceServers },
     });
+
     attachStream(session);
-    registerSessionEvents(session, target); // Pass target as ghContact
+    registerSessionEvents(session);
   } catch (error) {
     console.error('Failed to initiate call:', error);
+    sipEventHandlers.callFailed?.({
+      cause: error?.message || 'Failed to initiate call',
+      direction: 'outgoing',
+    });
+    throw error;
   }
 }
 
-// End the call
-export function endCall(ghContact) {
-  if (session) {
+export function endCall() {
+  if (!session) {
+    console.warn('No active session to terminate.');
+    return;
+  }
+
+  try {
+    console.log('Current session status before terminate:', {
+      hasSession: !!session,
+      isEnded: typeof session?.isEnded === 'function' ? session.isEnded() : 'n/a',
+      direction: session?.direction,
+    });
+
+    const alreadyEnded =
+      typeof session.isEnded === 'function' ? session.isEnded() : false;
+
+    if (alreadyEnded) {
+      console.log('Session already ended, skipping terminate()');
+      return;
+    }
+
+    console.log('Attempting to end call from app...');
     session.terminate();
-    console.log('Call ended by user');
-    stopCallTimer(ghContact);
+  } catch (error) {
+    console.warn('Failed to terminate session cleanly:', error);
   }
 }
 
-// Mute the call
 export function muteCall() {
   if (session) {
     session.mute({ audio: true });
@@ -203,7 +331,6 @@ export function muteCall() {
   }
 }
 
-// Unmute the call
 export function unmuteCall() {
   if (session) {
     session.unmute({ audio: true });
@@ -211,7 +338,6 @@ export function unmuteCall() {
   }
 }
 
-// Hold the call
 export function holdCall() {
   if (session) {
     session.hold();
@@ -219,7 +345,6 @@ export function holdCall() {
   }
 }
 
-// Resume the call from hold
 export function resumeCall() {
   if (session) {
     session.unhold();
@@ -227,96 +352,200 @@ export function resumeCall() {
   }
 }
 
-// Attach media stream to audio element
-function attachStream(session) {
-  session.connection.addEventListener('addstream', (event) => {
+function attachStream(currentSession) {
+  if (!currentSession?.connection) return;
+
+  currentSession.connection.addEventListener('addstream', (event) => {
     const audio = document.createElement('audio');
     audio.srcObject = event.stream;
-    audio.play();
+    audio.autoplay = true;
+
+    audio.play().catch((error) => {
+      console.warn('Failed to autoplay remote audio:', error);
+    });
+  });
+
+  currentSession.connection.addEventListener('track', () => {
+    console.log('PeerConnection track event received.');
+  });
+
+  currentSession.connection.addEventListener('icegatheringstatechange', () => {
+    console.log('ICE gathering state:', currentSession.connection.iceGatheringState);
+  });
+
+  currentSession.connection.addEventListener('iceconnectionstatechange', () => {
+    console.log('ICE connection state:', currentSession.connection.iceConnectionState);
+  });
+
+  currentSession.connection.addEventListener('connectionstatechange', () => {
+    console.log('Peer connection state:', currentSession.connection.connectionState);
   });
 }
 
-// Register session events, including handling when the other party hangs up
-function registerSessionEvents(session, ghContact) {
-  session.on('progress', () => console.log('Call is in progress...'));
-  
-  session.on('confirmed', () => {
-    console.log('Call confirmed');
+function registerSessionEvents(currentSession) {
+  if (!currentSession || currentSession._tceEventsRegistered) return;
+  currentSession._tceEventsRegistered = true;
+
+  currentSession.on('progress', () => {
+    const elapsed = callAttemptStartedAt
+      ? Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - callAttemptStartedAt)
+      : null;
+    console.log('Call is in progress...', elapsed !== null ? `elapsed=${elapsed}ms` : '');
+    sipEventHandlers.callProgress?.({
+      direction: currentSession.direction,
+    });
+  });
+
+  currentSession.on('confirmed', () => {
+    const elapsed = callAttemptStartedAt
+      ? Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - callAttemptStartedAt)
+      : null;
+    console.log('Call confirmed', elapsed !== null ? `elapsed=${elapsed}ms` : '');
+
+    if (!starttime) {
+      starttime = new Date();
+    }
+
     startCallTimer();
+
+    sipEventHandlers.callConfirmed?.({
+      direction: currentSession.direction,
+    });
   });
 
-  session.on('ended', (e) => {
+  currentSession.on('ended', (e) => {
     console.log('Call ended:', e.cause);
-    //stopCallTimer(ghContact);
+
+    const details = stopCallTimer(currentGhContact);
+
+    sipEventHandlers.callEnded?.({
+      cause: e.cause,
+      direction: currentSession.direction,
+      duration: details?.duration || '0m 0s',
+      starttime: details?.starttime,
+      endtime: details?.endtime,
+    });
+
+    cleanupSessionState(currentSession);
   });
-  
-  session.on('bye', () => {
+
+  currentSession.on('bye', () => {
     console.log('Other party hung up');
-    stopCallTimer(ghContact);
   });
 
-  session.on('failed', (e) => console.error('Call failed:', e.cause));
+  currentSession.on('failed', (e) => {
+    console.error('Call failed:', e.cause);
 
-  session.on("icecandidate", function (event) {
-    if (event.candidate?.type === "srflx" && event.candidate.relatedAddress && event.candidate.relatedPort) {
+    const details = stopCallTimer(currentGhContact);
+
+    sipEventHandlers.callFailed?.({
+      cause: e.cause,
+      direction: currentSession.direction,
+      duration: details?.duration || '0m 0s',
+      starttime: details?.starttime,
+      endtime: details?.endtime,
+    });
+
+    cleanupSessionState(currentSession);
+  });
+
+  currentSession.on('icecandidate', (event) => {
+    if (
+      event.candidate?.type === 'srflx' &&
+      event.candidate.relatedAddress &&
+      event.candidate.relatedPort
+    ) {
       event.ready();
     }
   });
 }
 
-// Start call duration timer
+function cleanupSessionState(currentSession) {
+  if (session === currentSession) {
+    session = null;
+  }
+  currentGhContact = null;
+  callAttemptStartedAt = undefined;
+}
+
 function startCallTimer() {
   if (isTimerRunning) return;
+
   isTimerRunning = true;
   seconds = 0;
   minutes = 0;
+
   callTimer = setInterval(() => {
     seconds++;
+
     if (seconds === 60) {
       seconds = 0;
       minutes++;
     }
-    console.log(`Call duration: ${minutes}m ${seconds}s`); // Log the timer values
+
+    console.log(`Call duration: ${minutes}m ${seconds}s`);
   }, 1000);
 }
 
-// Stop call duration timer and send post-call data
 function stopCallTimer(ghContact) {
   if (callTimer) {
     clearInterval(callTimer);
     callTimer = null;
   }
+
+  if (!isTimerRunning && !starttime) {
+    return null;
+  }
+
   isTimerRunning = false;
 
+  const safeStarttime = starttime ? starttime.toISOString() : new Date().toISOString();
   const endtime = new Date().toISOString();
   const duration = `${minutes}m ${seconds}s`;
-  
-  console.log(`Call ended. Duration: ${duration}`); // Log the final duration
 
-  // Extract specific fields from ghContact
+  console.log(`Call ended. Duration: ${duration}`);
+
   const { Id, FirstName, LastName, Email, Phone } = ghContact || {};
   const contactDetails = { Id, FirstName, LastName, Email, Phone };
 
-  sendPostCallData({ starttime: starttime.toISOString(), endtime, duration, ghContact: JSON.stringify(contactDetails) });
+  sendPostCallData({
+    starttime: safeStarttime,
+    endtime,
+    duration,
+    ghContact: JSON.stringify(contactDetails),
+  });
+
+  const result = {
+    starttime: safeStarttime,
+    endtime,
+    duration,
+  };
 
   seconds = 0;
   minutes = 0;
+  starttime = undefined;
+
+  return result;
 }
 
-// Ensure SIP client is registered before making a call
 async function ensureRegistered(target) {
-  if (!isClientInitialized) {
+  if (!isClientInitialized && !ua) {
     console.log('SIP Client not initialized. Initializing...');
-    initializeSIPClient();
+    const initialized = initializeSIPClient();
+    if (!initialized) {
+      throw new Error('SIP client is not authenticated yet.');
+    }
   }
+
   if (!isRegistered) {
     console.log('Waiting for SIP client to register...');
     await queueCall(target);
   }
 }
 
-// Function to send post-call data to AI backend
 async function sendPostCallData({ starttime, endtime, duration, ghContact }) {
+  const userDetails = ensureUserDetails({ redirectToLogin: false });
+
   const payload = {
     starttime,
     endtime,
@@ -328,32 +557,33 @@ async function sendPostCallData({ starttime, endtime, duration, ghContact }) {
     ghUserLastName: userDetails.LastName,
     ghUserEmail: userDetails.Email,
     ghContact,
-    postCallNotes: "",
-    postcallOption: "",
-    context: ""
+    postCallNotes: '',
+    postcallOption: '',
+    context: '',
   };
 
-  console.log('Sending post-call data:', payload); // Log the payload to verify
+  console.log('Sending post-call data:', payload);
 
   try {
-    const response = await axios.post('https://click-to-dial-postcall-1443.twil.io/logcall', payload);
-    console.log("Post-call data sent successfully:", response.data);
+    const response = await axios.post(
+      'https://click-to-dial-postcall-1443.twil.io/logcall',
+      payload
+    );
+    console.log('Post-call data sent successfully:', response.data);
   } catch (error) {
-    console.error("Error sending post-call data:", error);
+    console.error('Error sending post-call data:', error);
   }
 }
 
-// Check if SIP client is initialized
 export function isInitialized() {
   return isClientInitialized;
 }
 
-// Send DTMF during an active call
 export function sendDTMF(tone) {
   if (session && session.connection) {
     console.log(`Sending DTMF tone: ${tone}`);
     session.sendDTMF(tone);
   } else {
-    console.warn("No active call session to send DTMF tone.");
+    console.warn('No active call session to send DTMF tone.');
   }
 }

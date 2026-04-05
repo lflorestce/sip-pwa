@@ -9,7 +9,7 @@ export default async function handler(req, res) {
             // Make the request to the GlassHive API with the authorization header
             const response = await axios.get('https://rest.api.glasshive.com/partner/v1/contacts', {
                 headers: {
-                    Authorization: '8d906242-624c-4f19-bdf9-7dd14ca18e49',  // Replace with your actual API key
+                    Authorization: '8d906242-624c-4f19-bdf9-7dd14ca18e49',  // Replace with actual API key
                     'Cache-Control': 'no-cache',
                 },
                 // Pass any query parameters received from the frontend

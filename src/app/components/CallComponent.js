@@ -1,18 +1,21 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   makeCall,
   initializeSIPClient,
   endCall,
   muteCall,
+  unmuteCall,
   holdCall,
+  resumeCall,
   sendDTMF,
   answerCall,
   rejectCall,
-  registerIncomingCallHandler,
-  initializeAudio
+  initializeAudio,
+  registerSipEventHandlers,
 } from "@/lib/sipClient";
 import { fetchContactData } from "@/lib/glassHiveService";
+import { postDesktopMessage, subscribeDesktopMessages } from "@/lib/desktopBridge";
 
 const CallComponent = () => {
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -27,100 +30,251 @@ const CallComponent = () => {
   const [callEnded, setCallEnded] = useState(false);
   const [callConfirmed, setCallConfirmed] = useState(false);
   const [isFlipped, setIsFlipped] = useState(false);
+  const [callStatus, setCallStatus] = useState("idle");
+  const [registrationState, setRegistrationState] = useState({
+    connected: false,
+    registered: false,
+  });
+
+  const isCallActiveRef = useRef(false);
+  const callConfirmedRef = useRef(false);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      initializeSIPClient();
-      initializeAudio();
+    isCallActiveRef.current = isCallActive;
+  }, [isCallActive]);
 
-      registerIncomingCallHandler((session) => {
-        setIncomingCall(session);
-      });
+  useEffect(() => {
+    callConfirmedRef.current = callConfirmed;
+  }, [callConfirmed]);
 
-      // Load beep sound
-      const beep = new Audio('/sounds/beep.mp3');
-      setBeepSound(beep);
-
-      // Extract the phone number from URL query parameters
-      const params = new URLSearchParams(window.location.search);
-      const number = params.get("number");
-      setPhoneNumber(number || "");
-
-      if (number) {
-        const searchContacts = async () => {
-          console.log("Fetching contacts for", number);
-          const data = await fetchContactData(number);
-          if (data && data.length) {
-            setContacts(data);
-          } else {
-            console.log("No contacts found.");
-          }
-        };
-        searchContacts();
-      }
+  const fetchContactsForNumber = async (number) => {
+    if (!number?.trim()) {
+      setContacts([]);
+      return [];
     }
-  }, []);
+
+    try {
+      console.log("Fetching contacts for", number);
+      const data = await fetchContactData(number);
+      const safeData = Array.isArray(data) ? data : [];
+      setContacts(safeData);
+      return safeData;
+    } catch (error) {
+      console.error("Contact lookup failed:", error);
+      setContacts([]);
+      return [];
+    }
+  };
+
+  const startDirectCall = async (number) => {
+    if (!number?.trim()) return;
+
+    setSelectedContact(null);
+    setCallEnded(false);
+    setCallDuration(0);
+    setCallStatus("dialing");
+
+    try {
+      await makeCall(number, null);
+    } catch (error) {
+      console.error("Failed to place outbound call:", error);
+      setCallStatus("failed");
+    }
+  };
+
+  const processDialRequest = async ({ number, source = "manual", autoDial = false } = {}) => {
+    if (!number?.trim()) return;
+
+    setPhoneNumber(number);
+    setSelectedContact(null);
+    setCallEnded(false);
+    setCallConfirmed(false);
+    setCallDuration(0);
+    setCallStatus(source === "tel" ? "lookup" : "ready");
+
+    const matches = await fetchContactsForNumber(number);
+
+    if (matches.length === 1 && !isCallActiveRef.current && !callConfirmedRef.current) {
+      await handleContactSelect(matches[0]);
+      return;
+    }
+
+    if (matches.length === 0 && autoDial && !isCallActiveRef.current && !callConfirmedRef.current) {
+      await startDirectCall(number);
+      return;
+    }
+
+    setCallStatus(matches.length > 1 ? "contact-selection" : "ready");
+    postDesktopMessage("shellLog", {
+      message:
+        matches.length > 1
+          ? `Multiple contacts found for ${number}`
+          : `Dial request loaded for ${number}` ,
+    });
+  };
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    initializeSIPClient();
+    initializeAudio();
+
+    registerSipEventHandlers({
+      incomingCall: ({ session }) => {
+        setIncomingCall(session);
+        setCallEnded(false);
+        setCallConfirmed(false);
+        setIsCallActive(false);
+        setCallDuration(0);
+        setCallStatus("incoming");
+      },
+
+      callProgress: () => {
+        setCallStatus("progress");
+      },
+
+      callConfirmed: () => {
+        setIsCallActive(true);
+        setCallConfirmed(true);
+        setCallEnded(false);
+        setCallStatus("confirmed");
+      },
+
+      callEnded: () => {
+        setIsCallActive(false);
+        setIsMuted(false);
+        setIsOnHold(false);
+        setIncomingCall(null);
+        setCallConfirmed(false);
+        setCallEnded(true);
+        setCallStatus("ended");
+      },
+
+      callFailed: ({ cause }) => {
+        console.error("Call failed from component callback:", cause);
+        setIsCallActive(false);
+        setIsMuted(false);
+        setIsOnHold(false);
+        setIncomingCall(null);
+        setCallConfirmed(false);
+        setCallEnded(false);
+        setCallStatus(`failed${cause ? `: ${cause}` : ""}`);
+      },
+
+      registrationState: (state) => {
+        setRegistrationState(state);
+      },
+    });
+
+    const beep = new Audio("/sounds/beep.mp3");
+    setBeepSound(beep);
+
+    const unsubscribe = subscribeDesktopMessages((message) => {
+      if (message?.type === "dial") {
+        processDialRequest(message);
+      }
+    });
+
+    postDesktopMessage("dialerReady", {
+      page: window.location.pathname,
+    });
+
+    const params = new URLSearchParams(window.location.search);
+    const number = params.get("number");
+    if (number) {
+      processDialRequest({ number, source: "query", autoDial: false });
+    }
+
+    return () => {
+      unsubscribe();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (contacts.length === 1 && !isCallActive && !callConfirmed) {
       handleContactSelect(contacts[0]);
     }
-  }, [contacts]);
+  }, [contacts]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let timer;
-    if (isCallActive) {
+
+    if (isCallActive && callConfirmed) {
       timer = setInterval(() => {
         setCallDuration((prev) => prev + 1);
       }, 1000);
-    } else {
-      clearInterval(timer);
     }
-    return () => clearInterval(timer);
-  }, [isCallActive]);
+
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isCallActive, callConfirmed]);
+
+  useEffect(() => {
+    postDesktopMessage("callStatus", {
+      status: callStatus,
+      phoneNumber,
+      selectedContactId: selectedContact?.Id || null,
+    });
+  }, [callStatus, phoneNumber, selectedContact]);
+
+  useEffect(() => {
+    postDesktopMessage("registrationState", registrationState);
+  }, [registrationState]);
 
   const handleAnswer = () => {
-    if (incomingCall) {
-      answerCall(incomingCall);
-      setIsCallActive(true);
-      setIncomingCall(null);
-    }
+    if (!incomingCall) return;
+
+    answerCall(incomingCall);
+    setIncomingCall(null);
+    setCallDuration(0);
+    setCallEnded(false);
+    setCallStatus("answering");
   };
 
   const handleReject = () => {
-    if (incomingCall) {
-      rejectCall(incomingCall);
-      setIncomingCall(null);
-    }
+    if (!incomingCall) return;
+
+    rejectCall(incomingCall);
+    setIncomingCall(null);
+    setIsCallActive(false);
+    setCallConfirmed(false);
+    setCallStatus("rejected");
   };
 
-  const handleContactSelect = (contact) => {
+  const handleContactSelect = async (contact) => {
+    if (!contact?.Phone) return;
+
     setSelectedContact(contact);
-    setIsCallActive(true);
-    setCallConfirmed(true);
-    makeCall(contact.Phone);
+    setCallEnded(false);
+    setCallDuration(0);
+    setCallStatus("dialing");
+
+    try {
+      await makeCall(contact.Phone, contact);
+    } catch (error) {
+      console.error("Failed to place call to selected contact:", error);
+      setCallStatus("failed");
+    }
   };
 
   const handleEndCall = () => {
-    if (selectedContact) {
-      endCall(selectedContact); // Pass selected contact data for post-call webhook
-    } else {
-      endCall(phoneNumber); // If no contact, pass the phone number
-    }
-    setIsCallActive(false);
-    setIsMuted(false);
-    setIsOnHold(false);
-    setCallEnded(true);
+    endCall();
+    setCallStatus("ending");
   };
 
   const handleDialPadClick = (digit) => {
     if (beepSound) {
-      beepSound.play();
+      beepSound.currentTime = 0;
+      beepSound.play().catch((error) => {
+        console.warn("Failed to play keypad beep:", error);
+      });
     }
+
     if (isCallActive) {
-      sendDTMF(digit); // Send DTMF tones during an active call
+      sendDTMF(digit);
     } else {
-      setPhoneNumber((prev) => prev + digit); // Add digits to phone number if no active call
+      setPhoneNumber((prev) => prev + digit);
     }
   };
 
@@ -128,34 +282,58 @@ const CallComponent = () => {
     setPhoneNumber((prev) => prev.slice(0, -1));
   };
 
-  const handleCall = () => {
-    setIsCallActive(true);
-    setCallConfirmed(true);
-    makeCall(phoneNumber);
+  const handleCall = async () => {
+    if (!phoneNumber?.trim()) return;
+
+    setSelectedContact(null);
+    setCallEnded(false);
+    setCallDuration(0);
+    setCallStatus("dialing");
+
+    try {
+      await makeCall(phoneNumber, null);
+    } catch (error) {
+      console.error("Failed to place outbound call:", error);
+      setCallStatus("failed");
+    }
   };
 
   const handleMute = () => {
-    muteCall();
+    if (isMuted) {
+      unmuteCall();
+    } else {
+      muteCall();
+    }
+
     setIsMuted((prev) => !prev);
   };
 
   const handleHold = () => {
-    holdCall();
+    if (isOnHold) {
+      resumeCall();
+    } else {
+      holdCall();
+    }
+
     setIsOnHold((prev) => !prev);
   };
 
   const handleClear = () => {
-    window.location.href = '/';
+    window.location.href = "/";
   };
 
   const handleGoToContact = () => {
-    if (selectedContact) {
+    if (selectedContact?.Id) {
       window.location.href = `https://app.glasshive.com/Contacts/${selectedContact.Id}#Activities`;
     }
   };
 
   const handleGearClick = () => {
     setIsFlipped((prev) => !prev);
+  };
+
+  const handleMyProfileClick = () => {
+    window.location.href = "/userDetails";
   };
 
   const dialPadButtons = [
@@ -176,13 +354,12 @@ const CallComponent = () => {
   const formatDuration = (duration) => {
     const minutes = Math.floor(duration / 60);
     const seconds = duration % 60;
-    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+    return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
   };
 
   return (
-    <div className={`call-container ${isFlipped ? 'flipped' : ''}`}>
+    <div className={`call-container ${isFlipped ? "flipped" : ""}`}>
       <div className="phone-interface">
-        {/* Front side of the component */}
         {!isFlipped && (
           <>
             {incomingCall && (
@@ -217,15 +394,28 @@ const CallComponent = () => {
                 )}
                 <ul>
                   {contacts.map((contact) => (
-                    <li key={contact.Id} className="contact-card" onClick={() => handleContactSelect(contact)}>
+                    <li
+                      key={contact.Id}
+                      className="contact-card"
+                      onClick={() => handleContactSelect(contact)}
+                    >
                       <div className="contact-name">
                         <span className="phone-icon">📞</span> {contact.FirstName} {contact.LastName}
                       </div>
-                      <div className="contact-info">Last time called: {new Date(contact.LastCallDate).toLocaleDateString()}</div>
+                      <div className="contact-info">
+                        Last time called: {new Date(contact.LastCallDate).toLocaleDateString()}
+                      </div>
                       <div className="contact-info">Last called by: {contact.LastCaller}</div>
                     </li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {(callStatus !== "idle" || registrationState.connected) && (
+              <div style={{ fontSize: "12px", color: "#666", marginBottom: "10px" }}>
+                SIP: {registrationState.connected ? "Connected" : "Disconnected"} | Registered:{" "}
+                {registrationState.registered ? "Yes" : "No"} | Status: {callStatus}
               </div>
             )}
 
@@ -240,18 +430,24 @@ const CallComponent = () => {
               <div className="call-ended">
                 <p>Call ended</p>
                 <button className="clear-button" onClick={handleClear}>Clear</button>
-                <button className="go-to-contact-button" onClick={handleGoToContact}>Go to Contact</button>
+                <button
+                  className="go-to-contact-button"
+                  onClick={handleGoToContact}
+                  disabled={!selectedContact?.Id}
+                >
+                  Go to Contact
+                </button>
               </div>
             )}
 
-            {!callConfirmed && (
+            {!isCallActive && !callConfirmed && (
               <div className="phone-number-display">
                 <input
                   type="text"
                   value={phoneNumber}
                   onChange={(e) => setPhoneNumber(e.target.value)}
                   placeholder="Enter a number"
-                  disabled={isCallActive} // Disable input during an active call
+                  disabled={isCallActive}
                 />
                 <button onClick={handleDelete}>&#x232b;</button>
               </div>
@@ -267,33 +463,44 @@ const CallComponent = () => {
                 ))}
               </div>
             </div>
+
             <div className="call-controls">
               {!isCallActive && !callConfirmed && (
-                <button className={`call-button ${contacts.length > 0 ? 'clear' : ''}`} onClick={contacts.length > 0 ? handleClear : handleCall}>
+                <button
+                  className={`call-button ${contacts.length > 0 ? "clear" : ""}`}
+                  onClick={contacts.length > 0 ? handleClear : handleCall}
+                >
                   {contacts.length > 0 ? "Clear" : "Call"}
                 </button>
               )}
+
               {isCallActive && (
                 <>
-                  <button className={`control-button ${isMuted ? 'active' : ''}`} onClick={handleMute}>
+                  <button
+                    className={`control-button ${isMuted ? "active" : ""}`}
+                    onClick={handleMute}
+                  >
                     {isMuted ? "Unmute" : "Mute"}
                   </button>
                   <button className="control-button end-call-button" onClick={handleEndCall}>
                     Hang Up
                   </button>
-                  <button className={`control-button hold-button ${isOnHold ? 'active' : ''}`} onClick={handleHold}>
+                  <button
+                    className={`control-button hold-button ${isOnHold ? "active" : ""}`}
+                    onClick={handleHold}
+                  >
                     {isOnHold ? "Resume" : "Hold"}
                   </button>
                 </>
               )}
             </div>
+
             <div className="gear-icon" onClick={handleGearClick}>
               ⚙️
             </div>
           </>
         )}
 
-        {/* Back side of the component */}
         {isFlipped && (
           <div className="back-side">
             <div className="content-container">
@@ -301,8 +508,8 @@ const CallComponent = () => {
                 <span className="gear-icon-inline">⚙️</span> Settings
               </h2>
               <ul>
-                <li onClick={() => alert('My Call Logs')}>My Call Logs</li>
-                <li onClick={() => alert('My Profile')}>My Profile</li>
+                <li onClick={() => alert("My Call Logs")}>My Call Logs</li>
+                <li onClick={handleMyProfileClick}>My Profile</li>
               </ul>
             </div>
             <div className="gear-icon" onClick={handleGearClick}>
@@ -311,6 +518,7 @@ const CallComponent = () => {
           </div>
         )}
       </div>
+
       <style jsx>{`
         .call-container {
           display: flex;
@@ -333,11 +541,11 @@ const CallComponent = () => {
           transition: transform 0.6s, height 0.6s;
           transform-style: preserve-3d;
           position: relative;
-          height: auto; /* Ensure the height is auto to match the original dialer size */
+          height: auto;
         }
         .flipped .phone-interface {
           transform: rotateY(180deg);
-          height: 568px; /* Ensure the height matches the front side */
+          height: 568px;
         }
         .back-side {
           position: absolute;
@@ -351,12 +559,12 @@ const CallComponent = () => {
           box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
           backface-visibility: hidden;
           transform: rotateY(180deg);
-          border: 1px solid #e0e0e0; /* Light grey border */
+          border: 1px solid #e0e0e0;
           display: flex;
           flex-direction: column;
           justify-content: center;
           align-items: center;
-          overflow: hidden; /* Ensures content doesn't spill outside */
+          overflow: hidden;
         }
         .content-container {
           display: flex;
@@ -374,7 +582,7 @@ const CallComponent = () => {
           color: grey;
           cursor: pointer;
           opacity: 0.7;
-          z-index: 10; /* Ensure it stays clickable */
+          z-index: 10;
         }
         .gear-icon:hover {
           opacity: 1;
@@ -394,8 +602,8 @@ const CallComponent = () => {
           list-style: none;
           padding: 0;
           margin: 0;
-          width: 100%; /* Ensure full width alignment */
-          text-align: center; /* Center-align the list items */
+          width: 100%;
+          text-align: center;
         }
         .back-side li {
           margin: 10px 0;
@@ -641,6 +849,10 @@ const CallComponent = () => {
         .clear-button:hover, .go-to-contact-button:hover {
           background-color: #5a6268;
         }
+        .go-to-contact-button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
         .incoming-call-modal {
           position: absolute;
           top: 50%;
@@ -655,13 +867,11 @@ const CallComponent = () => {
           max-width: 300px;
           text-align: center;
         }
-
         .incoming-call-controls {
           display: flex;
           justify-content: space-around;
           margin-top: 20px;
         }
-
         .answer-button {
           background-color: #28a745;
           color: white;
@@ -670,7 +880,6 @@ const CallComponent = () => {
           border-radius: 5px;
           cursor: pointer;
         }
-
         .reject-button {
           background-color: #dc3545;
           color: white;
@@ -679,11 +888,9 @@ const CallComponent = () => {
           border-radius: 5px;
           cursor: pointer;
         }
-
         .answer-button:hover {
           background-color: #218838;
         }
-
         .reject-button:hover {
           background-color: #c82333;
         }

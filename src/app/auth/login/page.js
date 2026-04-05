@@ -79,7 +79,7 @@ export default function Login() {
           Don&apos;t have an account? <a href="/auth/register">Register here</a>
         </p>
         <p>
-          <a href="/icg-call-plugin.msi" download>Download the ICG Call Plugin</a>
+          <a href="/TelProtocolHandlerInstaller.exe" download>Download the ICG Call Plugin</a>
         </p>
       </div>
       <style jsx>{`
