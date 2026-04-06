@@ -4,11 +4,7 @@ import axios from 'axios';
 // Retrieve user details from local storage
 const userDetails = null;
 
-if (!userDetails) {
-  // Redirect to login page if user details are not found
-  window.location.href = '/login';
-  throw new Error('User details not found in local storage. Redirecting to login page.');
-}
+
 
 console.log('User details:', userDetails); // Log user details to verify
 
@@ -357,3 +353,4 @@ export function sendDTMF(tone) {
     console.warn("No active call session to send DTMF tone.");
   }
 }
+
