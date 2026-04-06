@@ -2,7 +2,7 @@ import JsSIP from 'jssip';
 import axios from 'axios';
 
 // Retrieve user details from local storage
-const userDetails = typeof window !== 'undefined' ? JSON.parse(localStorage.getItem('userDetails') || 'null') : null;
+const userDetails = null;
 
 if (!userDetails) {
   // Redirect to login page if user details are not found
