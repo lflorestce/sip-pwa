@@ -156,6 +156,14 @@ const CallComponent = () => {
     setIsFlipped((prev) => !prev);
   };
 
+  const handleOpenCallLogs = () => {
+    window.location.href = "/call-logs";
+  };
+
+  const handleOpenProfile = () => {
+    window.location.href = "/profile";
+  };
+
   const dialPadButtons = [
     { digit: "1", letters: "" },
     { digit: "2", letters: "ABC" },
@@ -183,6 +191,7 @@ const CallComponent = () => {
         {/* Front side of the component */}
         {!isFlipped && (
           <>
+            <img src="/img/TCEVoiceIQ-Vecotized-Logo1.svg" alt="TCE Voice IQ Logo" className="dialer-logo" />
             {incomingCall && (
               <div className="incoming-call-modal">
                 <h2>Incoming Call</h2>
@@ -299,8 +308,8 @@ const CallComponent = () => {
                 <span className="gear-icon-inline">⚙️</span> Settings
               </h2>
               <ul>
-                <li onClick={() => alert('My Call Logs')}>My Call Logs</li>
-                <li onClick={() => alert('My Profile')}>My Profile</li>
+                <li onClick={handleOpenCallLogs}>My Call Logs</li>
+                <li onClick={handleOpenProfile}>My Profile</li>
               </ul>
             </div>
             <div className="gear-icon" onClick={handleGearClick}>
@@ -332,6 +341,14 @@ const CallComponent = () => {
           transform-style: preserve-3d;
           position: relative;
           height: auto; /* Ensure the height is auto to match the original dialer size */
+        }
+        .dialer-logo {
+          width: 220px;
+          max-width: 100%;
+          height: auto;
+          display: block;
+          margin: 0 auto 16px;
+          opacity: 0.9;
         }
         .flipped .phone-interface {
           transform: rotateY(180deg);

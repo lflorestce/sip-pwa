@@ -125,7 +125,7 @@ export default function Register() {
     <div className="register-container">
       {showConfetti && <Confetti />}
       <div className="register-box">
-        <img src="/InsightCallGeniusAI.svg" alt="InsightCallGeniusAI Logo" className="logo" />
+        <img src="/img/TCEVoiceIQ-Vecotized-Logo1.svg" alt="TCE Voice IQ Logo" className="logo" />
         <h1>Register</h1>
         <form onSubmit={handleSubmit}>
           <h3>Company Details</h3>
@@ -287,10 +287,12 @@ export default function Register() {
           width: 100%;
         }
         .logo {
-          width: 150px;
+          width: 220px;
+          max-width: 100%;
+          height: auto;
           display: block;
           margin: 0 auto 20px;
-          opacity: 0.7;
+          opacity: 0.85;
         }
         input, select, meter {
           display: block;

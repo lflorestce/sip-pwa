@@ -52,7 +52,7 @@ export default function Login() {
     <div className="login-container">
       {showConfetti && <Confetti />}
       <div className="login-box">
-        <img src="/InsightCallGeniusAI.svg" alt="InsightCallGeniusAI Logo" className="logo" />
+        <img src="/img/TCEVoiceIQ-Vecotized-Logo1.svg" alt="TCE Voice IQ Logo" className="logo" />
         <h1>Login</h1>
         <form onSubmit={handleSubmit}>
           <input
@@ -79,7 +79,7 @@ export default function Login() {
           Don&apos;t have an account? <a href="/auth/register">Register here</a>
         </p>
         <p>
-          <a href="/icg-call-plugin.msi" download>Download the ICG Call Plugin</a>
+          <a href="/TceTelShell.Setup.msi" download>Download the TceTelShell Setup</a>
         </p>
       </div>
       <style jsx>{`
@@ -100,10 +100,12 @@ export default function Login() {
           width: 100%;
         }
         .logo {
-          width: 150px;
+          width: 220px;
+          max-width: 100%;
+          height: auto;
           display: block;
           margin: 0 auto 20px;
-          opacity: 0.7;
+          opacity: 0.85;
         }
         input {
           display: block;

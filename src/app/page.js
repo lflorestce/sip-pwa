@@ -55,7 +55,7 @@ export default function Home() {
         </button>
       </main>
       <footer className="mt-auto text-center w-full">
-        &copy; {new Date().getFullYear()} Insight Call Genius AI
+        &copy; {new Date().getFullYear()} TCE Voice IQ. All rights reserved.
       </footer>
     </div>
   );

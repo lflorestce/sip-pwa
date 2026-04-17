@@ -6,7 +6,9 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "seed:calllogs": "node backend/scripts/generateCallLogs.js",
+    "update:transcripts": "node backend/scripts/updateCallTranscripts.js"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.699.0",
@@ -24,6 +26,7 @@
     "jsonwebtoken": "^9.0.2",
     "jssip": "^3.10.1",
     "libphonenumber-js": "^1.11.14",
+    "lucide-react": "^1.8.0",
     "mssql": "^11.0.1",
     "next": "^14.2.18",
     "react": "^18.3.1",
@@ -34,8 +37,8 @@
   "devDependencies": {
     "eslint": "^8",
     "eslint-config-next": "15.0.3",
+    "netlify-cli": "^6.0.0",
     "postcss": "^8",
-    "tailwindcss": "^3.4.17",
-    "netlify-cli": "^6.0.0"
+    "tailwindcss": "^3.4.17"
   }
 }
