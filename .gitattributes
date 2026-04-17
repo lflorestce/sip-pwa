@@ -1,1 +1,2 @@
+*.msi filter=lfs diff=lfs merge=lfs -text
 public/TceTelShell.Setup.msi filter=lfs diff=lfs merge=lfs -text
