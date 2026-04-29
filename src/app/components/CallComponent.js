@@ -1048,6 +1048,39 @@ const CallComponent = () => {
     return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
   };
 
+  const buildDeviceOptions = (devices, selectedDeviceId, fallbackLabel) => {
+    const hasSelectedDevice =
+      !selectedDeviceId || devices.some((device) => device.deviceId === selectedDeviceId);
+
+    if (hasSelectedDevice) {
+      return devices;
+    }
+
+    return [
+      {
+        deviceId: selectedDeviceId,
+        label: `${fallbackLabel} (saved)`,
+      },
+      ...devices,
+    ];
+  };
+
+  const audioInputOptions = buildDeviceOptions(
+    audioInputDevices,
+    selectedAudioInputDeviceId,
+    "Selected microphone"
+  );
+  const audioOutputOptions = buildDeviceOptions(
+    audioOutputDevices,
+    selectedAudioOutputDeviceId,
+    "Selected speaker"
+  );
+  const ringOutputOptions = buildDeviceOptions(
+    audioOutputDevices,
+    selectedRingOutputDeviceId,
+    "Selected ring device"
+  );
+
   const displayValue = isCallActive ? activeCallDigits : phoneNumber;
   const displayPlaceholder = isCallActive ? "Enter extension" : "Enter a number";
 
@@ -1257,7 +1290,7 @@ const CallComponent = () => {
                     onChange={(event) => handleAudioInputDeviceChange(event.target.value)}
                   >
                     <option value="">System default microphone</option>
-                    {audioInputDevices.map((device, index) => (
+                    {audioInputOptions.map((device, index) => (
                       <option key={device.deviceId || `input-${index}`} value={device.deviceId}>
                         {device.label || `Microphone ${index + 1}`}
                       </option>
@@ -1277,7 +1310,7 @@ const CallComponent = () => {
                     disabled={typeof HTMLMediaElement !== "undefined" && !HTMLMediaElement.prototype.setSinkId}
                   >
                     <option value="">System default speaker</option>
-                    {audioOutputDevices.map((device, index) => (
+                    {audioOutputOptions.map((device, index) => (
                       <option key={device.deviceId || `output-${index}`} value={device.deviceId}>
                         {device.label || `Speaker ${index + 1}`}
                       </option>
@@ -1297,7 +1330,7 @@ const CallComponent = () => {
                     disabled={typeof HTMLMediaElement !== "undefined" && !HTMLMediaElement.prototype.setSinkId}
                   >
                     <option value="">System default ring device</option>
-                    {audioOutputDevices.map((device, index) => (
+                    {ringOutputOptions.map((device, index) => (
                       <option key={device.deviceId || `ring-${index}`} value={device.deviceId}>
                         {device.label || `Ring device ${index + 1}`}
                       </option>
