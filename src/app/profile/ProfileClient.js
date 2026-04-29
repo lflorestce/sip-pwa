@@ -2,12 +2,14 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { requestDesktopWindowState } from "@/lib/desktopBridge";
 import styles from "./page.module.css";
 
 const NAV_ITEMS = [
   { id: "profile", label: "Profile" },
   { id: "calling", label: "Calling" },
   { id: "security", label: "Security" },
+  { id: "integrations", label: "Integrations" },
 ];
 
 function cx(...values) {
@@ -36,8 +38,18 @@ export default function ProfileClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
+  const [microsoftStatus, setMicrosoftStatus] = useState({
+    loading: true,
+    configured: false,
+    connected: false,
+    profile: null,
+    warning: "",
+    connectedAt: null,
+  });
 
   useEffect(() => {
+    requestDesktopWindowState("maximized", "profile");
+
     const authToken = localStorage.getItem("authToken");
     if (!authToken) {
       router.push("/auth/login");
@@ -99,6 +111,66 @@ export default function ProfileClient() {
     };
   }, [router]);
 
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadMicrosoftStatus() {
+      try {
+        const response = await fetch("/api/microsoft/status", { cache: "no-store" });
+        const payload = await response.json();
+
+        if (!isMounted) {
+          return;
+        }
+
+        setMicrosoftStatus({
+          loading: false,
+          configured: Boolean(payload.configured),
+          connected: Boolean(payload.connected),
+          profile: payload.profile || null,
+          warning: payload.warning || "",
+          connectedAt: payload.connectedAt || null,
+        });
+      } catch (statusError) {
+        if (!isMounted) {
+          return;
+        }
+
+        setMicrosoftStatus({
+          loading: false,
+          configured: false,
+          connected: false,
+          profile: null,
+          warning:
+            statusError instanceof Error
+              ? statusError.message
+              : "Unable to verify Microsoft Graph status.",
+          connectedAt: null,
+        });
+      }
+    }
+
+    loadMicrosoftStatus();
+
+    const handleMicrosoftAuth = (event) => {
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+
+      if (event.data?.type !== "voiceiq-microsoft-auth") {
+        return;
+      }
+
+      loadMicrosoftStatus();
+    };
+
+    window.addEventListener("message", handleMicrosoftAuth);
+    return () => {
+      isMounted = false;
+      window.removeEventListener("message", handleMicrosoftAuth);
+    };
+  }, []);
+
   const displayProfile = useMemo(() => {
     if (!profile && !localUserDetails) {
       return null;
@@ -119,6 +191,51 @@ export default function ProfileClient() {
     };
   }, [localUserDetails, profile]);
 
+  function handleBackToDialer() {
+    requestDesktopWindowState("normal", "dialer");
+    router.push("/");
+  }
+
+  function handleConnectMicrosoft() {
+    const popup = window.open(
+      "/api/microsoft/connect",
+      "voiceiq-microsoft-connect",
+      "width=560,height=760,resizable=yes,scrollbars=yes"
+    );
+
+    if (!popup) {
+      setMicrosoftStatus((current) => ({
+        ...current,
+        warning: "The browser blocked the Microsoft sign-in popup. Please allow popups and try again.",
+      }));
+    }
+  }
+
+  async function handleDisconnectMicrosoft() {
+    try {
+      await fetch("/api/microsoft/disconnect", {
+        method: "POST",
+      });
+
+      setMicrosoftStatus({
+        loading: false,
+        configured: microsoftStatus.configured,
+        connected: false,
+        profile: null,
+        warning: "",
+        connectedAt: null,
+      });
+    } catch (disconnectError) {
+      setMicrosoftStatus((current) => ({
+        ...current,
+        warning:
+          disconnectError instanceof Error
+            ? disconnectError.message
+            : "Unable to disconnect Microsoft Outlook right now.",
+      }));
+    }
+  }
+
   function renderHero() {
     return (
       <div className={styles.hero}>
@@ -133,7 +250,7 @@ export default function ProfileClient() {
             and security status pulled from the User table and enriched with the active session details.
           </p>
         </div>
-        <button className={styles.primaryButton} onClick={() => router.push("/")}>
+        <button className={styles.primaryButton} onClick={handleBackToDialer}>
           Back to Dialer
         </button>
       </div>
@@ -300,6 +417,92 @@ export default function ProfileClient() {
     );
   }
 
+  function renderIntegrationsSection() {
+    return (
+      <div className={styles.grid}>
+        <section className={styles.card}>
+          <div className={styles.cardHeader}>
+            <div>
+              <h2>Microsoft Outlook</h2>
+              <div className={styles.subtle}>
+                Connect your Microsoft 365 account so VoiceIQ can answer availability questions and create calendar events during a live call.
+              </div>
+            </div>
+            <span className={cx(styles.statusBadge, microsoftStatus.connected ? styles.statusConnected : styles.statusDisconnected)}>
+              {microsoftStatus.loading
+                ? "Checking"
+                : microsoftStatus.connected
+                  ? "Connected"
+                  : microsoftStatus.configured
+                    ? "Not Connected"
+                    : "Not Configured"}
+            </span>
+          </div>
+
+          <div className={styles.integrationGrid}>
+            <div className={styles.integrationCard}>
+              <span className={styles.integrationLabel}>Connected account</span>
+              <strong>{microsoftStatus.profile?.email || "-"}</strong>
+              <p>{microsoftStatus.profile?.displayName || "No Microsoft account linked in this browser yet."}</p>
+            </div>
+
+            <div className={styles.integrationCard}>
+              <span className={styles.integrationLabel}>Availability access</span>
+              <strong>Read and write</strong>
+              <p>VoiceIQ can look up open Outlook slots and create calendar events when you ask.</p>
+            </div>
+          </div>
+
+          <div className={styles.buttonRow}>
+            <button
+              type="button"
+              className={styles.primaryButton}
+              onClick={handleConnectMicrosoft}
+              disabled={!microsoftStatus.configured}
+            >
+              {microsoftStatus.connected ? "Reconnect Outlook" : "Connect Outlook"}
+            </button>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={handleDisconnectMicrosoft}
+              disabled={!microsoftStatus.connected}
+            >
+              Disconnect
+            </button>
+          </div>
+
+          {microsoftStatus.warning ? (
+            <div className={cx(styles.message, styles.warning)}>{microsoftStatus.warning}</div>
+          ) : null}
+        </section>
+
+        <aside className={styles.accentCard}>
+          <div className={styles.cardHeader}>
+            <div>
+              <h2>What VoiceIQ Can Do</h2>
+              <div className={styles.subtle}>Outlook scheduling support for the live assistant.</div>
+            </div>
+          </div>
+          <div className={styles.sectionStack}>
+            <div className={styles.miniCard}>
+              <span className={styles.miniLabel}>Live prompt</span>
+              <div className={styles.integrationNote}>Find my nearest availability in my Outlook calendar.</div>
+            </div>
+            <div className={styles.miniCard}>
+              <span className={styles.miniLabel}>Connection scope</span>
+              <div className={styles.integrationNote}>Calendars.ReadWrite plus basic Microsoft profile access.</div>
+            </div>
+            <div className={styles.miniCard}>
+              <span className={styles.miniLabel}>Connected since</span>
+              <div className={styles.integrationNote}>{formatDate(microsoftStatus.connectedAt)}</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.page}>
       <aside className={styles.sidebar}>
@@ -341,6 +544,12 @@ export default function ProfileClient() {
                 <span className={styles.summaryLabel}>Profile Source</span>
                 <strong className={styles.summaryValue}>{profile ? "AWS User" : "Session"}</strong>
               </article>
+              <article className={styles.summaryCard}>
+                <span className={styles.summaryLabel}>Outlook Link</span>
+                <strong className={styles.summaryValue}>
+                  {microsoftStatus.connected ? "Connected" : microsoftStatus.loading ? "Checking" : "Off"}
+                </strong>
+              </article>
             </div>
 
             {warning ? <div className={cx(styles.message, styles.warning)}>{warning}</div> : null}
@@ -350,6 +559,7 @@ export default function ProfileClient() {
             {!loading && activeSection === "profile" ? renderProfileSection() : null}
             {!loading && activeSection === "calling" ? renderCallingSection() : null}
             {!loading && activeSection === "security" ? renderSecuritySection() : null}
+            {!loading && activeSection === "integrations" ? renderIntegrationsSection() : null}
           </div>
         </section>
       </main>

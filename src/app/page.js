@@ -2,7 +2,11 @@
 
 "use client"; // Enables client-side rendering for this component
 import React, { useEffect } from "react";
+import Script from "next/script";
 import CallComponent from "./components/CallComponent";
+import AppFooter from "./components/AppFooter";
+import DesktopBridgeDebug from "./components/DesktopBridgeDebug";
+import { desktopBridgeScript, requestDesktopWindowState } from "@/lib/desktopBridge";
 import { useRouter } from "next/navigation";
 
 export default function Home() {
@@ -15,6 +19,8 @@ export default function Home() {
       // If no token, redirect to the login page
       router.push("/auth/login");
     }
+
+    requestDesktopWindowState("normal", "dialer");
     // Optionally, you could add further token validation here, such as decoding the JWT.
 
     // Register the service worker
@@ -41,22 +47,20 @@ export default function Home() {
   };
 
   return (
-    <div className="flex flex-col items-center min-h-screen p-8 sm:p-20">
-      <main className="flex flex-col gap-8 items-center w-full">
-        {/* Render the CallComponent directly */}
-        <CallComponent />
-
-        {/* Logout Link */}
-        <button
-          onClick={handleLogout}
-          className="text-red-500 underline mt-4"
-        >
-          Logout
-        </button>
-      </main>
-      <footer className="mt-auto text-center w-full">
-        &copy; {new Date().getFullYear()} TCE Voice IQ. All rights reserved.
-      </footer>
-    </div>
+    <>
+      <Script
+        id="webview2-bridge"
+        strategy="beforeInteractive"
+        dangerouslySetInnerHTML={{ __html: desktopBridgeScript }}
+      />
+      <div className="flex flex-col items-center min-h-screen p-8 sm:p-20">
+        <DesktopBridgeDebug />
+        <main className="flex flex-col gap-8 items-center w-full">
+          {/* Render the CallComponent directly */}
+          <CallComponent />
+        </main>
+        <AppFooter onLogout={handleLogout} />
+      </div>
+    </>
   );
 }

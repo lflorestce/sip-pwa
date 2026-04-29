@@ -13,6 +13,82 @@ let minutes = 0;
 let starttime;
 let ringtone;
 let incomingCallHandlerRegistered = false;
+let currentCallContext = null;
+const registeredSessions = new WeakSet();
+const sessionContexts = new WeakMap();
+const remoteStreams = new WeakMap();
+const remoteAudioElements = new Set();
+let activeCallFinalized = false;
+let preferredAudioInputDeviceId = '';
+let preferredAudioOutputDeviceId = '';
+let preferredRingOutputDeviceId = '';
+
+export const AUDIO_INPUT_DEVICE_STORAGE_KEY = 'voiceiqAudioInputDeviceId';
+export const AUDIO_OUTPUT_DEVICE_STORAGE_KEY = 'voiceiqAudioOutputDeviceId';
+export const RING_OUTPUT_DEVICE_STORAGE_KEY = 'voiceiqRingOutputDeviceId';
+
+function emitBrowserEvent(name, detail) {
+  if (!isBrowser()) return;
+
+  window.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+function getSessionMediaStreams(activeSession) {
+  if (!activeSession?.connection) {
+    return {
+      localStream: null,
+      remoteStream: null,
+    };
+  }
+
+  const senderTracks = activeSession.connection
+    .getSenders()
+    .map((sender) => sender.track)
+    .filter((track) => track && track.kind === 'audio');
+
+  const receiverTracks = activeSession.connection
+    .getReceivers()
+    .map((receiver) => receiver.track)
+    .filter((track) => track && track.kind === 'audio');
+
+  const localStream = senderTracks.length ? new MediaStream(senderTracks) : null;
+  const remoteStream =
+    remoteStreams.get(activeSession) ||
+    (receiverTracks.length ? new MediaStream(receiverTracks) : null);
+
+  return {
+    localStream,
+    remoteStream,
+  };
+}
+
+function emitSessionMediaStreams(activeSession) {
+  if (!isBrowser()) return;
+
+  const { localStream, remoteStream } = getSessionMediaStreams(activeSession);
+  emitBrowserEvent('sip-call-media-streams', {
+    hasLocalStream: !!localStream,
+    hasRemoteStream: !!remoteStream,
+    localStream,
+    remoteStream,
+  });
+}
+
+function cleanupSessionAudio(activeSession) {
+  const remoteStream = remoteStreams.get(activeSession);
+  remoteStreams.delete(activeSession);
+
+  if (!remoteStream) {
+    return;
+  }
+
+  remoteAudioElements.forEach((audioElement) => {
+    if (audioElement.srcObject === remoteStream) {
+      audioElement.srcObject = null;
+      remoteAudioElements.delete(audioElement);
+    }
+  });
+}
 
 function isBrowser() {
   return typeof window !== 'undefined' && typeof document !== 'undefined';
@@ -66,11 +142,130 @@ function getConfiguration() {
   };
 }
 
+function loadAudioDevicePreferences() {
+  if (!isBrowser()) return;
+
+  preferredAudioInputDeviceId = localStorage.getItem(AUDIO_INPUT_DEVICE_STORAGE_KEY) || '';
+  preferredAudioOutputDeviceId = localStorage.getItem(AUDIO_OUTPUT_DEVICE_STORAGE_KEY) || '';
+  preferredRingOutputDeviceId = localStorage.getItem(RING_OUTPUT_DEVICE_STORAGE_KEY) || '';
+}
+
+function getAudioConstraints() {
+  if (!preferredAudioInputDeviceId) {
+    return true;
+  }
+
+  return {
+    deviceId: {
+      exact: preferredAudioInputDeviceId,
+    },
+  };
+}
+
+async function applyAudioOutputDevice(audioElement) {
+  if (!audioElement || !preferredAudioOutputDeviceId || typeof audioElement.setSinkId !== 'function') {
+    return;
+  }
+
+  try {
+    await audioElement.setSinkId(preferredAudioOutputDeviceId);
+  } catch (error) {
+    console.warn('Unable to apply selected speaker device:', error);
+  }
+}
+
+async function applyRingOutputDevice() {
+  if (!ringtone || !preferredRingOutputDeviceId || typeof ringtone.setSinkId !== 'function') {
+    return;
+  }
+
+  try {
+    await ringtone.setSinkId(preferredRingOutputDeviceId);
+  } catch (error) {
+    console.warn('Unable to apply selected ring device:', error);
+  }
+}
+
+async function applyAudioOutputDevices() {
+  await applyRingOutputDevice();
+
+  for (const audioElement of remoteAudioElements) {
+    await applyAudioOutputDevice(audioElement);
+  }
+}
+
+export async function setAudioDevicePreferences({
+  inputDeviceId = '',
+  outputDeviceId = '',
+  ringOutputDeviceId = '',
+} = {}) {
+  if (!isBrowser()) return;
+
+  preferredAudioInputDeviceId = inputDeviceId;
+  preferredAudioOutputDeviceId = outputDeviceId;
+  preferredRingOutputDeviceId = ringOutputDeviceId;
+
+  if (inputDeviceId) {
+    localStorage.setItem(AUDIO_INPUT_DEVICE_STORAGE_KEY, inputDeviceId);
+  } else {
+    localStorage.removeItem(AUDIO_INPUT_DEVICE_STORAGE_KEY);
+  }
+
+  if (outputDeviceId) {
+    localStorage.setItem(AUDIO_OUTPUT_DEVICE_STORAGE_KEY, outputDeviceId);
+  } else {
+    localStorage.removeItem(AUDIO_OUTPUT_DEVICE_STORAGE_KEY);
+  }
+
+  if (ringOutputDeviceId) {
+    localStorage.setItem(RING_OUTPUT_DEVICE_STORAGE_KEY, ringOutputDeviceId);
+  } else {
+    localStorage.removeItem(RING_OUTPUT_DEVICE_STORAGE_KEY);
+  }
+
+  await applyAudioOutputDevices();
+  await replaceActiveMicrophoneTrack();
+}
+
+async function replaceActiveMicrophoneTrack() {
+  if (!isBrowser() || !session?.connection || !preferredAudioInputDeviceId) {
+    return;
+  }
+
+  const sender = session.connection
+    .getSenders()
+    .find((currentSender) => currentSender.track?.kind === 'audio');
+
+  if (!sender) {
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: getAudioConstraints(),
+      video: false,
+    });
+    const [track] = stream.getAudioTracks();
+    if (!track) {
+      return;
+    }
+
+    const previousTrack = sender.track;
+    await sender.replaceTrack(track);
+    previousTrack?.stop();
+    emitSessionMediaStreams(session);
+  } catch (error) {
+    console.warn('Unable to switch active microphone device:', error);
+  }
+}
+
 export function initializeAudio() {
   if (!isBrowser()) return;
 
+  loadAudioDevicePreferences();
   ringtone = new Audio('/sounds/ringtone.mp3');
   ringtone.loop = true;
+  applyRingOutputDevice();
 }
 
 export function playRingtone() {
@@ -85,7 +280,7 @@ export function stopRingtone() {
   if (ringtone) ringtone.currentTime = 0;
 }
 
-export function answerCall(incomingSession) {
+export function answerCall(incomingSession, options = {}) {
   const configuration = getConfiguration();
   if (!incomingSession || !configuration) {
     console.warn('Cannot answer call: missing session or SIP configuration.');
@@ -93,13 +288,20 @@ export function answerCall(incomingSession) {
   }
 
   stopRingtone();
+  starttime = new Date();
+  activeCallFinalized = false;
+  currentCallContext = {
+    ghContact: options.contact ?? null,
+    phoneNumber: options.phoneNumber ?? incomingSession.remote_identity?.uri?.user ?? '',
+    postCallEnabled: !!options.postCallEnabled,
+  };
   session = incomingSession;
   session.answer({
-    mediaConstraints: { audio: true, video: false },
+    mediaConstraints: { audio: getAudioConstraints(), video: false },
     pcConfig: { iceServers: configuration.iceServers },
   });
   attachStream(session);
-  registerSessionEvents(session);
+  registerSessionEvents(session, currentCallContext);
 }
 
 export function rejectCall(incomingSession) {
@@ -170,16 +372,16 @@ export function initializeSIPClient() {
   ua.start();
 }
 
-function queueCall(target) {
+function queueCall(target, options = {}) {
   return new Promise((resolve) => {
-    callQueue.push({ target, resolve });
+    callQueue.push({ target, options, resolve });
   });
 }
 
 function processQueuedCalls() {
   while (callQueue.length > 0) {
-    const { target, resolve } = callQueue.shift();
-    makeCall(target).then(resolve);
+    const { target, options, resolve } = callQueue.shift();
+    makeCall(target, options).then(resolve);
   }
 }
 
@@ -197,13 +399,13 @@ function formatToE164(number) {
   return `+${formattedNumber}`;
 }
 
-export async function makeCall(target) {
+export async function makeCall(target, options = {}) {
   if (!target) {
     console.warn('No target number provided to makeCall.');
     return;
   }
 
-  await ensureRegistered(target);
+  await ensureRegistered(target, options);
 
   const configuration = getConfiguration();
   if (!configuration || !ua) {
@@ -216,25 +418,55 @@ export async function makeCall(target) {
   console.log(`Attempting to call: ${sipUri}`);
 
   starttime = new Date();
+  activeCallFinalized = false;
+  currentCallContext = {
+    ghContact: options.contact ?? null,
+    phoneNumber: options.phoneNumber ?? target,
+    postCallEnabled: !!options.postCallEnabled,
+  };
 
   try {
     session = ua.call(sipUri, {
-      mediaConstraints: { audio: true, video: false },
+      mediaConstraints: { audio: getAudioConstraints(), video: false },
       pcConfig: { iceServers: configuration.iceServers },
     });
     attachStream(session);
-    registerSessionEvents(session, target);
+    registerSessionEvents(session, currentCallContext);
   } catch (error) {
     console.error('Failed to initiate call:', error);
   }
 }
 
-export function endCall(ghContact) {
-  if (!session) return;
+export function endCall(callContextOverride) {
+  const activeSession = session;
+  const resolvedContext = resolveCallContext(callContextOverride);
 
-  session.terminate();
-  console.log('Call ended by user');
-  stopCallTimer(ghContact);
+  if (!activeSession) {
+    stopCallTimer(resolvedContext);
+    return;
+  }
+
+  const terminatedStates = new Set([
+    activeSession.C?.STATUS_CANCELED,
+    activeSession.C?.STATUS_TERMINATED,
+  ]);
+
+  if (terminatedStates.has(activeSession.status)) {
+    console.log('Hang up ignored because the session is already terminated.', {
+      status: activeSession.status,
+    });
+    stopCallTimer(resolvedContext);
+    return;
+  }
+
+  try {
+    activeSession.terminate();
+    console.log('Call ended by user');
+  } catch (error) {
+    console.warn('Unable to terminate the active session cleanly:', error);
+  }
+
+  stopCallTimer(resolvedContext);
 }
 
 export function muteCall() {
@@ -268,35 +500,81 @@ export function resumeCall() {
 function attachStream(activeSession) {
   if (!isBrowser() || !activeSession?.connection) return;
 
-  activeSession.connection.addEventListener('addstream', (event) => {
+  const handleRemoteStream = (stream) => {
+    if (!stream) return;
+
+    remoteStreams.set(activeSession, stream);
     const audio = document.createElement('audio');
-    audio.srcObject = event.stream;
+    audio.srcObject = stream;
+    remoteAudioElements.add(audio);
+    applyAudioOutputDevice(audio);
     audio.play().catch((error) => {
       console.warn('Unable to play remote audio stream:', error);
     });
+    emitSessionMediaStreams(activeSession);
+  };
+
+  activeSession.connection.addEventListener('addstream', (event) => {
+    handleRemoteStream(event.stream);
   });
+
+  activeSession.connection.addEventListener('track', (event) => {
+    const [stream] = event.streams || [];
+    if (stream) {
+      handleRemoteStream(stream);
+      return;
+    }
+
+    if (event.track?.kind === 'audio') {
+      handleRemoteStream(new MediaStream([event.track]));
+    }
+  });
+
+  emitSessionMediaStreams(activeSession);
 }
 
-function registerSessionEvents(activeSession, ghContact) {
+function registerSessionEvents(activeSession, callContext) {
   if (!activeSession) return;
+
+  if (callContext) {
+    sessionContexts.set(activeSession, resolveCallContext(callContext));
+  }
+
+  if (registeredSessions.has(activeSession)) {
+    return;
+  }
+
+  registeredSessions.add(activeSession);
 
   activeSession.on('progress', () => console.log('Call is in progress...'));
 
   activeSession.on('confirmed', () => {
     console.log('Call confirmed');
     startCallTimer();
+    emitSessionMediaStreams(activeSession);
+    emitBrowserEvent('sip-call-live-state', { active: true });
   });
 
   activeSession.on('ended', (e) => {
     console.log('Call ended:', e.cause);
+    stopCallTimer(sessionContexts.get(activeSession));
+    cleanupSessionAudio(activeSession);
+    emitBrowserEvent('sip-call-live-state', { active: false, reason: e.cause || 'ended' });
   });
 
   activeSession.on('bye', () => {
     console.log('Other party hung up');
-    stopCallTimer(ghContact);
+    stopCallTimer(sessionContexts.get(activeSession));
+    cleanupSessionAudio(activeSession);
+    emitBrowserEvent('sip-call-live-state', { active: false, reason: 'bye' });
   });
 
-  activeSession.on('failed', (e) => console.error('Call failed:', e.cause));
+  activeSession.on('failed', (e) => {
+    console.error('Call failed:', e.cause);
+    stopCallTimer(sessionContexts.get(activeSession));
+    cleanupSessionAudio(activeSession);
+    emitBrowserEvent('sip-call-live-state', { active: false, reason: e.cause || 'failed' });
+  });
 
   activeSession.on('icecandidate', (event) => {
     if (
@@ -307,6 +585,25 @@ function registerSessionEvents(activeSession, ghContact) {
       event.ready();
     }
   });
+}
+
+function resolveCallContext(callContextOverride) {
+  const source = callContextOverride ?? currentCallContext ?? {};
+
+  if (typeof source === 'string') {
+    return {
+      ghContact: null,
+      phoneNumber: source,
+      postCallEnabled: false,
+    };
+  }
+
+  const contact = source.contact ?? source.ghContact ?? null;
+  return {
+    ghContact: contact,
+    phoneNumber: source.phoneNumber ?? contact?.Phone ?? '',
+    postCallEnabled: !!source.postCallEnabled,
+  };
 }
 
 function startCallTimer() {
@@ -326,7 +623,13 @@ function startCallTimer() {
   }, 1000);
 }
 
-function stopCallTimer(ghContact) {
+function stopCallTimer(callContext) {
+  if (activeCallFinalized) {
+    return;
+  }
+
+  activeCallFinalized = true;
+
   if (callTimer) {
     clearInterval(callTimer);
     callTimer = null;
@@ -339,8 +642,16 @@ function stopCallTimer(ghContact) {
 
   console.log(`Call ended. Duration: ${duration}`);
 
+  const resolvedCallContext = resolveCallContext(callContext);
+  const ghContact = resolvedCallContext.ghContact;
   const { Id, FirstName, LastName, Email, Phone } = ghContact || {};
-  const contactDetails = { Id, FirstName, LastName, Email, Phone };
+  const contactDetails = {
+    Id,
+    FirstName,
+    LastName,
+    Email,
+    Phone: Phone || resolvedCallContext.phoneNumber || '',
+  };
 
   if (starttime) {
     sendPostCallData({
@@ -348,14 +659,18 @@ function stopCallTimer(ghContact) {
       endtime,
       duration,
       ghContact: JSON.stringify(contactDetails),
+      postCallEnabled: resolvedCallContext.postCallEnabled,
     });
   }
 
   seconds = 0;
   minutes = 0;
+  starttime = null;
+  currentCallContext = null;
+  session = null;
 }
 
-async function ensureRegistered(target) {
+async function ensureRegistered(target, options = {}) {
   if (!isClientInitialized) {
     console.log('SIP Client not initialized. Initializing...');
     initializeSIPClient();
@@ -363,11 +678,11 @@ async function ensureRegistered(target) {
 
   if (!isRegistered) {
     console.log('Waiting for SIP client to register...');
-    await queueCall(target);
+    await queueCall(target, options);
   }
 }
 
-async function sendPostCallData({ starttime, endtime, duration, ghContact }) {
+async function sendPostCallData({ starttime, endtime, duration, ghContact, postCallEnabled }) {
   const userDetails = getUserDetails();
   if (!userDetails) {
     console.warn('Skipping post-call data: userDetails not available.');
@@ -385,6 +700,7 @@ async function sendPostCallData({ starttime, endtime, duration, ghContact }) {
     ghUserLastName: userDetails.LastName,
     ghUserEmail: userDetails.Email,
     ghContact,
+    'post-call': postCallEnabled ? 'true' : 'false',
     postCallNotes: '',
     postcallOption: '',
     context: '',

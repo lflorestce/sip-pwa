@@ -1,14 +1,16 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { CassetteTape, Download, Send } from "lucide-react";
+import { CassetteTape, Copy, Download, PhoneCall, Send, Trash2, X } from "lucide-react";
 import {
   buildAgentBreakdown,
   buildCallLogMetrics,
   buildDailyVolume,
   formatDuration,
 } from "@/lib/callLogTransforms";
+import { requestDesktopWindowState } from "@/lib/desktopBridge";
 import styles from "./page.module.css";
 
 const NAV_ITEMS = [
@@ -118,6 +120,10 @@ export default function CallLogsClient() {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    requestDesktopWindowState("maximized", "call-logs");
+  }, []);
   const [warning, setWarning] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -132,6 +138,8 @@ export default function CallLogsClient() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatWarning, setChatWarning] = useState("");
   const [chatError, setChatError] = useState("");
+  const [selectedLog, setSelectedLog] = useState(null);
+  const [deleteRestrictionVisible, setDeleteRestrictionVisible] = useState(false);
   const currentCursor = cursorStack[cursorStack.length - 1];
 
   useEffect(() => {
@@ -195,6 +203,46 @@ export default function CallLogsClient() {
     }
   }, [activeView, chatLoading, chatMessages]);
 
+  useEffect(() => {
+    if (!deleteRestrictionVisible) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      setDeleteRestrictionVisible(false);
+    }, 3000);
+
+    return () => window.clearTimeout(timer);
+  }, [deleteRestrictionVisible]);
+
+  useEffect(() => {
+    if (!selectedLog) {
+      return undefined;
+    }
+
+    const handleEscape = (event) => {
+      if (event.key === "Escape") {
+        closeLogDetails();
+      }
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [selectedLog]);
+
+  useEffect(() => {
+    if (!selectedLog) {
+      return undefined;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [selectedLog]);
+
   const sortedLogs = useMemo(() => {
     const next = [...logs];
     next.sort((left, right) => {
@@ -216,6 +264,20 @@ export default function CallLogsClient() {
   const dailyVolume = useMemo(() => buildDailyVolume(logs, 14), [logs]);
   const topAgents = useMemo(() => buildAgentBreakdown(logs, 5), [logs]);
   const statusBreakdown = useMemo(() => buildStatusBreakdown(logs), [logs]);
+
+  function handleBackToDialer() {
+    requestDesktopWindowState("normal", "dialer");
+    router.push("/");
+  }
+
+  function renderBackToDialerAction() {
+    return (
+      <button className={styles.heroDialerLink} onClick={handleBackToDialer}>
+        <span>Back to dialer</span>
+        <PhoneCall size={15} strokeWidth={2.2} />
+      </button>
+    );
+  }
 
   function toggleSort(columnKey) {
     setSortConfig((current) => ({
@@ -262,6 +324,192 @@ export default function CallLogsClient() {
       link.parentNode.removeChild(link);
     }
     URL.revokeObjectURL(url);
+  }
+
+  async function copyToClipboard(value) {
+    if (!value) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch (error) {
+      console.error("Failed to copy value to clipboard.", error);
+    }
+  }
+
+  function downloadLogSnapshot(log) {
+    const payload = {
+      ...log,
+      exportedAt: new Date().toISOString(),
+    };
+
+    handleDownload({
+      filename: `call-record-${log.id}.json`,
+      mimeType: "application/json",
+      base64: window.btoa(unescape(encodeURIComponent(JSON.stringify(payload, null, 2)))),
+    });
+  }
+
+  function openLogDetails(log) {
+    setSelectedLog(log);
+    setDeleteRestrictionVisible(false);
+  }
+
+  function closeLogDetails() {
+    setSelectedLog(null);
+    setDeleteRestrictionVisible(false);
+  }
+
+  function renderSelectedLogModal() {
+    if (!selectedLog) {
+      return null;
+    }
+
+    return (
+      <div className={styles.modalScrim} onClick={closeLogDetails}>
+        <div
+          className={styles.recordModal}
+          onClick={(event) => event.stopPropagation()}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="call-record-detail-title"
+        >
+          <button className={styles.modalClose} onClick={closeLogDetails} aria-label="Close call record details">
+            <X size={18} strokeWidth={2.4} />
+          </button>
+
+          <div className={styles.modalHeader}>
+            <div>
+              <p className={styles.modalEyebrow}>Call Record Detail</p>
+              <h2 id="call-record-detail-title" className={styles.modalTitle}>
+                {selectedLog.customer}
+              </h2>
+              <p className={styles.modalSubtle}>
+                {formatDateTime(selectedLog.startedAt)} {" - "} {selectedLog.agent}
+              </p>
+            </div>
+            <span className={cx(styles.statusPill, getStatusClass(selectedLog.status))}>
+              {selectedLog.status}
+            </span>
+          </div>
+
+          <div className={styles.modalGrid}>
+            <div className={styles.detailCard}>
+              <span className={styles.detailLabel}>Transcript ID</span>
+              <strong className={styles.detailValueMono}>{selectedLog.id}</strong>
+            </div>
+            <div className={styles.detailCard}>
+              <span className={styles.detailLabel}>Contact ID</span>
+              <strong className={styles.detailValueMono}>{selectedLog.contactId}</strong>
+            </div>
+            <div className={styles.detailCard}>
+              <span className={styles.detailLabel}>Duration</span>
+              <strong>{formatDuration(selectedLog.durationSeconds)}</strong>
+            </div>
+            <div className={styles.detailCard}>
+              <span className={styles.detailLabel}>Post Call</span>
+              <strong>{selectedLog.disposition}</strong>
+            </div>
+          </div>
+
+          <div className={styles.modalSections}>
+            <section className={styles.modalSection}>
+              <div className={styles.modalSectionHeader}>
+                <h3>Call Transcript</h3>
+                <button
+                  type="button"
+                  className={styles.inlineAction}
+                  onClick={() => copyToClipboard(selectedLog.callTranscript)}
+                >
+                  <Copy size={14} strokeWidth={2} />
+                  <span>Copy transcript</span>
+                </button>
+              </div>
+              <p className={styles.modalBodyText}>{selectedLog.callTranscript || "No transcript stored for this record."}</p>
+            </section>
+
+            <section className={styles.modalSection}>
+              <div className={styles.modalSectionHeader}>
+                <h3>AI Analysis</h3>
+              </div>
+              <p className={styles.modalBodyText}>{selectedLog.aiAnalysis || "No AI analysis stored for this record."}</p>
+            </section>
+          </div>
+
+          <div className={styles.modalActions}>
+            <button
+              type="button"
+              className={styles.ghostButton}
+              onClick={() => downloadLogSnapshot(selectedLog)}
+            >
+              <Download size={16} strokeWidth={2} />
+              <span>Download JSON</span>
+            </button>
+
+            <button
+              type="button"
+              className={styles.ghostButton}
+              onClick={() => copyToClipboard(selectedLog.id)}
+            >
+              <Copy size={16} strokeWidth={2} />
+              <span>Copy Record ID</span>
+            </button>
+
+            {selectedLog.recordingUrl ? (
+              <a
+                className={styles.primaryButton}
+                href={selectedLog.recordingUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <CassetteTape size={16} strokeWidth={2} />
+                <span>Open Recording</span>
+              </a>
+            ) : null}
+
+            <button
+              type="button"
+              className={styles.deleteAction}
+              onClick={() => setDeleteRestrictionVisible(true)}
+            >
+              <Trash2 size={16} strokeWidth={2} />
+              <span>Delete Record</span>
+            </button>
+          </div>
+        </div>
+
+        {deleteRestrictionVisible ? (
+          <div
+            className={styles.permissionPromptLayer}
+            onClick={() => setDeleteRestrictionVisible(false)}
+          >
+            <div
+              className={styles.permissionPrompt}
+              onClick={(event) => event.stopPropagation()}
+              role="alertdialog"
+              aria-labelledby="delete-record-restriction-title"
+              aria-describedby="delete-record-restriction-copy"
+            >
+              <button
+                type="button"
+                className={styles.permissionToastClose}
+                onClick={() => setDeleteRestrictionVisible(false)}
+                aria-label="Dismiss permission notice"
+              >
+                <X size={14} strokeWidth={2.4} />
+              </button>
+              <strong id="delete-record-restriction-title" className={styles.permissionPromptTitle}>
+                Delete record unavailable
+              </strong>
+              <p id="delete-record-restriction-copy" className={styles.permissionPromptText}>
+                Only Super Admins can delete Call Records.
+              </p>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   async function submitQuestion(questionOverride) {
@@ -337,10 +585,13 @@ export default function CallLogsClient() {
             <p className={styles.eyebrow}>{eyebrow}</p>
             <span className={styles.chip}>{chip}</span>
           </div>
-          <h1 className={styles.heroTitle}>{title}</h1>
+          <div className={styles.heroTitleRow}>
+            <h1 className={styles.heroTitle}>{title}</h1>
+            {action ? <span className={styles.heroTitleDivider}>|</span> : null}
+            {action}
+          </div>
           <p className={styles.heroText}>{text}</p>
         </div>
-        {action}
       </div>
     );
   }
@@ -354,7 +605,7 @@ export default function CallLogsClient() {
             "Operations Console",
             "Call Logs",
             "Standard CDR-style review mapped to the real CallLogsV2 fields: transcript, timing, caller ownership, contact, status, post-call outcome, and AI summary.",
-            <button className={styles.primaryButton} onClick={() => router.push("/")}>Back to Dialer</button>
+            renderBackToDialerAction()
           )}
 
           <div className={styles.summaryGrid}>
@@ -437,7 +688,18 @@ export default function CallLogsClient() {
                   <tbody>
                     {sortedLogs.length ? (
                       sortedLogs.map((log) => (
-                        <tr key={log.id}>
+                        <tr
+                          key={log.id}
+                          className={styles.clickableRow}
+                          onClick={() => openLogDetails(log)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              openLogDetails(log);
+                            }
+                          }}
+                          tabIndex={0}
+                        >
                           <td><div className={styles.stackCell}><strong>{formatDateTime(log.startedAt)}</strong><span>Started</span></div></td>
                           <td><div className={styles.stackCell}><strong>{formatDateTime(log.endedAt)}</strong><span>Ended</span></div></td>
                           <td><div className={styles.stackCell}><strong>{log.agent}</strong><span>{log.agentEmail}</span></div></td>
@@ -455,10 +717,11 @@ export default function CallLogsClient() {
                                   className={styles.recordingLink}
                                   href={log.recordingUrl}
                                   target="_blank"
-                                rel="noreferrer"
-                                aria-label="Open recording"
-                                title="Open recording"
-                              >
+                                  rel="noreferrer"
+                                  aria-label="Open recording"
+                                  title="Open recording"
+                                  onClick={(event) => event.stopPropagation()}
+                                >
                                 <CassetteTape size={16} strokeWidth={2} />
                               </a>
                             ) : (
@@ -503,8 +766,9 @@ export default function CallLogsClient() {
           {renderHero(
             "Operations Snapshot",
             "Insurance Agency View",
-            "Dashboard",
-            "A more vibrant KPI layer for call performance, transcript coverage, and agent activity using the live data currently stored in DynamoDB."
+            "DashboardIQ",
+            "A more vibrant KPI layer for call performance, transcript coverage, and agent activity using the live data currently stored in DynamoDB.",
+            renderBackToDialerAction()
           )}
 
           <div className={styles.metricsGrid}>
@@ -618,7 +882,8 @@ export default function CallLogsClient() {
             "Conversational Analytics",
             "VoiceIQ Live",
             "VoiceIQ Insights",
-            "Live assistant access to your DynamoDB CDR data for call center analytics, support, sales, QA, coaching, and report exports."
+            "Live assistant access to your DynamoDB CDR data for call center analytics, support, sales, QA, coaching, and report exports.",
+            renderBackToDialerAction()
           )}
 
           <div className={styles.insightsLayout}>
@@ -724,32 +989,46 @@ export default function CallLogsClient() {
   }
 
   return (
-    <div className={styles.page}>
-      <aside className={styles.sidebar}>
-        <div className={styles.sidebarBrand}>
-          <img src="/img/TCEVoiceIQ-Vecotized-Logo1.svg" alt="TCE VoiceIQ logo" className={styles.sidebarLogo} />
-          <p className={styles.sidebarEyebrow}>TCE VoiceIQ</p>
-          <h2 className={styles.sidebarTitle}>My Call Logs</h2>
-        </div>
+    <>
+      <div className={styles.page}>
+        <aside className={styles.sidebar}>
+          <div className={styles.sidebarBrand}>
+            <img src="/img/TCEVoiceIQ-Vecotized-Logo1.svg" alt="TCE VoiceIQ logo" className={styles.sidebarLogo} />
+            <p className={styles.sidebarEyebrow}>TCE VoiceIQ</p>
+            <h2 className={styles.sidebarTitle}>My Call Logs</h2>
+          </div>
 
-        <nav className={styles.nav}>
-          {NAV_ITEMS.map((item) => (
+          <nav className={styles.nav}>
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                className={cx(styles.navItem, activeView === item.id && styles.navItemActive)}
+                onClick={() => setActiveView(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+
             <button
-              key={item.id}
-              className={cx(styles.navItem, activeView === item.id && styles.navItemActive)}
-              onClick={() => setActiveView(item.id)}
+              className={styles.navItem}
+              onClick={handleBackToDialer}
             >
-              {item.label}
+              <span>Back to dialer</span>
+              <PhoneCall size={16} strokeWidth={2.2} />
             </button>
-          ))}
-        </nav>
-      </aside>
+          </nav>
+        </aside>
 
-      <main className={styles.content}>
-        {activeView === "logs" ? renderLogs() : null}
-        {activeView === "dashboard" ? renderDashboard() : null}
-        {activeView === "insights" ? renderInsights() : null}
-      </main>
-    </div>
+        <main className={styles.content}>
+          {activeView === "logs" ? renderLogs() : null}
+          {activeView === "dashboard" ? renderDashboard() : null}
+          {activeView === "insights" ? renderInsights() : null}
+        </main>
+      </div>
+
+      {selectedLog && typeof document !== "undefined"
+        ? createPortal(renderSelectedLogModal(), document.body)
+        : null}
+    </>
   );
 }
