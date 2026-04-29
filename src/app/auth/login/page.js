@@ -4,6 +4,9 @@ import axios from "axios";
 import { useRouter } from "next/navigation";
 import Confetti from "react-confetti";
 
+const TCE_TEL_SHELL_INSTALLER_URL =
+  process.env.NEXT_PUBLIC_TCE_TEL_SHELL_INSTALLER_URL || "/TceTelShell.Setup.msi";
+
 export default function Login() {
   const [formData, setFormData] = useState({
     Email: "",
@@ -79,7 +82,7 @@ export default function Login() {
           Don&apos;t have an account? <a href="/auth/register">Register here</a>
         </p>
         <p>
-          <a href="/TceTelShell.Setup.msi" download>Download the TceTelShell Setup</a>
+          <a href={TCE_TEL_SHELL_INSTALLER_URL} download>Download the TceTelShell Setup</a>
         </p>
       </div>
       <style jsx>{`
