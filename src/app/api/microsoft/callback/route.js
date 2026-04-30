@@ -7,13 +7,16 @@ import {
   decodeAuthCookie,
   encodeMicrosoftSessionCookie,
   exchangeAuthorizationCodeForSession,
+  getMicrosoftRedirectUri,
   hasMicrosoftGraphConfig,
 } from "@/lib/microsoftGraph";
 
 export const dynamic = "force-dynamic";
 
 function buildCompletionUrl(request, status, message = "") {
-  const url = new URL("/microsoft/connected", request.url);
+  const redirectUri = getMicrosoftRedirectUri(request);
+  const publicOrigin = new URL(redirectUri).origin;
+  const url = new URL("/microsoft/connected", publicOrigin);
   url.searchParams.set("status", status);
   if (message) {
     url.searchParams.set("message", message);
