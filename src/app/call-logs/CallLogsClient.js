@@ -882,7 +882,7 @@ export default function CallLogsClient() {
             "Conversational Analytics",
             "VoiceIQ Live",
             "VoiceIQ Insights",
-            "Live assistant access to your DynamoDB CDR data for call center analytics, support, sales, QA, coaching, and report exports.",
+            "Live assistant access CDR data for call center analytics, support, sales, QA, coaching, and report exports.",
             renderBackToDialerAction()
           )}
 
