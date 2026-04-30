@@ -105,6 +105,55 @@ function getUserDetails() {
   }
 }
 
+function normalizeText(value) {
+  return String(value || '').trim();
+}
+
+function buildIceServers(userDetails) {
+  const stunUrl =
+    normalizeText(process.env.NEXT_PUBLIC_ICE_STUN_URL) ||
+    'stun:stun.l.google.com:19302';
+  const turnUrl =
+    normalizeText(process.env.NEXT_PUBLIC_ICE_TURN_URL) ||
+    normalizeText(process.env.NEXT_PUBLIC_TURN_URL) ||
+    'turn:turn.relay.metered.ca:443';
+  const turnUsername =
+    normalizeText(process.env.NEXT_PUBLIC_ICE_TURN_USERNAME) ||
+    normalizeText(process.env.NEXT_PUBLIC_TURN_USERNAME) ||
+    normalizeText(userDetails?.WebRTCName);
+  const turnCredential =
+    normalizeText(process.env.NEXT_PUBLIC_ICE_TURN_CREDENTIAL) ||
+    normalizeText(process.env.NEXT_PUBLIC_TURN_PASSWORD) ||
+    normalizeText(userDetails?.WebRTCPw);
+
+  const iceServers = [];
+  if (stunUrl) {
+    iceServers.push({ urls: stunUrl });
+  }
+
+  if (turnUrl && turnUsername && turnCredential) {
+    iceServers.push(
+      {
+        urls: turnUrl,
+        username: turnUsername,
+        credential: turnCredential,
+      },
+      {
+        urls: `${turnUrl}?transport=udp`,
+        username: turnUsername,
+        credential: turnCredential,
+      },
+      {
+        urls: `${turnUrl}?transport=tcp`,
+        username: turnUsername,
+        credential: turnCredential,
+      }
+    );
+  }
+
+  return iceServers;
+}
+
 function getConfiguration() {
   const userDetails = getUserDetails();
   if (!userDetails) return null;
@@ -115,24 +164,7 @@ function getConfiguration() {
     session_timers: false,
     register: true,
     traceSip: true,
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      {
-        urls: 'turn:turn.relay.metered.ca:443',
-        username: userDetails.WebRTCName,
-        credential: userDetails.WebRTCPw,
-      },
-      {
-        urls: 'turn:turn.relay.metered.ca:443?transport=udp',
-        username: userDetails.WebRTCName,
-        credential: userDetails.WebRTCPw,
-      },
-      {
-        urls: 'turn:turn.relay.metered.ca:443?transport=tcp',
-        username: userDetails.WebRTCName,
-        credential: userDetails.WebRTCPw,
-      },
-    ],
+    iceServers: buildIceServers(userDetails),
     sessionDescriptionHandlerFactoryOptions: {
       peerConnectionConfiguration: {
         bundlePolicy: 'max-bundle',
