@@ -1,10 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown } from "lucide-react";
 import {
   readLiveTranscriptSnapshot,
   subscribeToLiveTranscript,
 } from "@/lib/liveTranscriptBridge";
+
+const ASSISTANT_WINDOW_WIDTH = 460;
+const ASSISTANT_WINDOW_HEIGHT = 720;
+const WINDOW_GAP = 12;
 
 const EMPTY_SNAPSHOT = {
   callActive: false,
@@ -13,6 +18,7 @@ const EMPTY_SNAPSHOT = {
   transcript: [],
   liveTranscriptEnabled: false,
   voiceIqAssistantEnabled: false,
+  voiceCommand: null,
   updatedAt: null,
 };
 
@@ -22,6 +28,10 @@ export default function LiveTranscriptPage() {
   const transcriptEndRef = useRef(null);
   const transcriptPanelRef = useRef(null);
   const assistantWindowRef = useRef(null);
+  const openAssistantWindowRef = useRef(null);
+  const openedVoiceCommandIdRef = useRef(null);
+  const isProgrammaticScrollRef = useRef(false);
+  const userPausedAutoScrollRef = useRef(false);
 
   useEffect(() => {
     document.title = "TCE VoiceIQ Live Transcript";
@@ -55,7 +65,7 @@ export default function LiveTranscriptPage() {
   }, []);
 
   useEffect(() => {
-    if (!shouldAutoScrollTranscript) {
+    if (!shouldAutoScrollTranscript || userPausedAutoScrollRef.current) {
       return;
     }
 
@@ -65,7 +75,11 @@ export default function LiveTranscriptPage() {
     }
 
     requestAnimationFrame(() => {
-      panel.scrollTop = panel.scrollHeight;
+      isProgrammaticScrollRef.current = true;
+      transcriptEndRef.current?.scrollIntoView({ block: "end" });
+      window.setTimeout(() => {
+        isProgrammaticScrollRef.current = false;
+      }, 120);
     });
   }, [shouldAutoScrollTranscript, snapshot.transcript]);
 
@@ -89,20 +103,85 @@ export default function LiveTranscriptPage() {
       return;
     }
 
-    const distanceFromBottom =
-      panel.scrollHeight - panel.scrollTop - panel.clientHeight;
-    setShouldAutoScrollTranscript(distanceFromBottom < 48);
-  };
-
-  const scrollTranscriptToBottom = () => {
-    const panel = transcriptPanelRef.current;
-    if (!panel) {
+    if (isProgrammaticScrollRef.current) {
       return;
     }
 
-    setShouldAutoScrollTranscript(true);
-    panel.scrollTop = panel.scrollHeight;
+    const distanceFromBottom =
+      panel.scrollHeight - panel.scrollTop - panel.clientHeight;
+    const isNearBottom = distanceFromBottom < 56;
+    userPausedAutoScrollRef.current = !isNearBottom;
+    setShouldAutoScrollTranscript(isNearBottom);
   };
+
+  const pauseAutoScroll = () => {
+    userPausedAutoScrollRef.current = true;
+    setShouldAutoScrollTranscript(false);
+  };
+
+  const handleTranscriptWheel = (event) => {
+    if (event.deltaY < 0) {
+      pauseAutoScroll();
+    }
+  };
+
+  const handleTranscriptPointerDown = () => {
+    const panel = transcriptPanelRef.current;
+    if (!panel || panel.scrollHeight <= panel.clientHeight + 4) {
+      return;
+    }
+
+    pauseAutoScroll();
+  };
+
+  const scrollTranscriptToBottom = () => {
+    userPausedAutoScrollRef.current = false;
+    setShouldAutoScrollTranscript(true);
+    isProgrammaticScrollRef.current = true;
+    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    window.setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+    }, 320);
+  };
+
+  const getAssistantWindowLayout = () => {
+    const screenLeft = Number(window.screen?.availLeft ?? window.screenX ?? 0);
+    const screenTop = Number(window.screen?.availTop ?? window.screenY ?? 0);
+    const screenWidth = Number(window.screen?.availWidth ?? window.screen?.width ?? 1200);
+    const screenHeight = Number(window.screen?.availHeight ?? window.screen?.height ?? 800);
+    const currentLeft = Number(window.screenX ?? screenLeft);
+    const currentTop = Number(window.screenY ?? screenTop);
+    const currentWidth = Number(window.outerWidth || ASSISTANT_WINDOW_WIDTH);
+    const height = Math.min(ASSISTANT_WINDOW_HEIGHT, Math.max(520, screenHeight - 48));
+    const preferredLeft = currentLeft + currentWidth + WINDOW_GAP;
+    const maxLeft = screenLeft + screenWidth - ASSISTANT_WINDOW_WIDTH;
+    const left =
+      preferredLeft <= maxLeft
+        ? preferredLeft
+        : Math.max(screenLeft, currentLeft - ASSISTANT_WINDOW_WIDTH - WINDOW_GAP);
+    const top = Math.max(screenTop, Math.min(currentTop, screenTop + screenHeight - height));
+
+    return {
+      left,
+      top,
+      height,
+    };
+  };
+
+  const buildAssistantWindowFeatures = ({ left, top, height }) =>
+    [
+      "popup=yes",
+      "toolbar=no",
+      "menubar=no",
+      "location=no",
+      "status=no",
+      "scrollbars=yes",
+      "resizable=yes",
+      `width=${ASSISTANT_WINDOW_WIDTH}`,
+      `height=${height}`,
+      `left=${Math.max(0, Math.round(left))}`,
+      `top=${Math.max(0, Math.round(top))}`,
+    ].join(",");
 
   const openAssistantWindow = () => {
     if (typeof window === "undefined") {
@@ -110,26 +189,37 @@ export default function LiveTranscriptPage() {
     }
 
     if (assistantWindowRef.current && !assistantWindowRef.current.closed) {
+      const layout = getAssistantWindowLayout();
+      assistantWindowRef.current.moveTo?.(layout.left, layout.top);
+      assistantWindowRef.current.resizeTo?.(ASSISTANT_WINDOW_WIDTH, layout.height);
       assistantWindowRef.current.focus();
       return;
     }
 
+    const layout = getAssistantWindowLayout();
+
     assistantWindowRef.current = window.open(
       "/live-transcript-assistant",
       "voiceiq-live-transcript-assistant",
-      [
-        "popup=yes",
-        "toolbar=no",
-        "menubar=no",
-        "location=no",
-        "status=no",
-        "scrollbars=yes",
-        "resizable=yes",
-        "width=460",
-        "height=720",
-      ].join(",")
+      buildAssistantWindowFeatures(layout)
     );
   };
+
+  openAssistantWindowRef.current = openAssistantWindow;
+
+  useEffect(() => {
+    const commandId = snapshot.voiceCommand?.id;
+    if (
+      !commandId ||
+      !snapshot.voiceIqAssistantEnabled ||
+      openedVoiceCommandIdRef.current === commandId
+    ) {
+      return;
+    }
+
+    openedVoiceCommandIdRef.current = commandId;
+    openAssistantWindowRef.current?.();
+  }, [snapshot.voiceCommand, snapshot.voiceIqAssistantEnabled]);
 
   return (
     <main className="live-transcript-shell">
@@ -160,6 +250,8 @@ export default function LiveTranscriptPage() {
           className="transcript-panel"
           aria-live="polite"
           onScroll={handleTranscriptScroll}
+          onWheelCapture={handleTranscriptWheel}
+          onPointerDown={handleTranscriptPointerDown}
         >
           {snapshot.transcript.length > 0 ? (
             snapshot.transcript.map((turn) => (
@@ -188,6 +280,7 @@ export default function LiveTranscriptPage() {
             aria-label="Jump to latest transcript lines"
             title="Jump to latest"
           >
+            <ArrowDown size={18} strokeWidth={2.4} aria-hidden="true" />
             ↓
           </button>
         )}
@@ -321,21 +414,30 @@ export default function LiveTranscriptPage() {
           position: absolute;
           right: 22px;
           bottom: 18px;
-          width: 34px;
-          height: 34px;
-          border: 1px solid rgba(255, 255, 255, 0.1);
+          width: 38px;
+          height: 38px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(255, 255, 255, 0.14);
           border-radius: 999px;
-          background: rgba(16, 23, 31, 0.88);
+          background: rgba(16, 23, 31, 0.58);
+          backdrop-filter: blur(8px);
           color: #dce6f1;
-          font-size: 18px;
+          font-size: 0;
           line-height: 1;
           cursor: pointer;
-          box-shadow: 0 8px 18px rgba(7, 10, 14, 0.28);
-          transition: transform 0.18s ease, background 0.18s ease;
+          opacity: 0.82;
+          box-shadow: 0 8px 18px rgba(7, 10, 14, 0.18);
+          transition: transform 0.18s ease, background 0.18s ease, opacity 0.18s ease;
         }
         .jump-to-latest:hover {
           transform: translateY(-1px);
-          background: rgba(26, 36, 49, 0.96);
+          background: rgba(26, 36, 49, 0.82);
+          opacity: 1;
+        }
+        .jump-to-latest :global(svg) {
+          pointer-events: none;
         }
       `}</style>
     </main>

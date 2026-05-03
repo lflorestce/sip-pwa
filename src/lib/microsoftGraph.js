@@ -6,8 +6,54 @@ export const MICROSOFT_GRAPH_AUTH_COOKIE = "voiceiq_ms_graph_auth";
 const DEFAULT_TENANT = "common";
 const DEFAULT_SCOPES = ["openid", "profile", "offline_access", "User.Read", "Calendars.ReadWrite"];
 const DEFAULT_TIMEZONE = "America/Chicago";
+const DEFAULT_GRAPH_EVENT_TIMEZONE = "Central Standard Time";
 const DEFAULT_BUSINESS_START_HOUR = 8;
 const DEFAULT_BUSINESS_END_HOUR = 18;
+const MONTH_NAME_TO_NUMBER = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+const WEEKDAY_NAME_TO_INDEX = {
+  sunday: 0,
+  sun: 0,
+  monday: 1,
+  mon: 1,
+  tuesday: 2,
+  tue: 2,
+  tues: 2,
+  wednesday: 3,
+  wed: 3,
+  thursday: 4,
+  thu: 4,
+  thur: 4,
+  thurs: 4,
+  friday: 5,
+  fri: 5,
+  saturday: 6,
+  sat: 6,
+};
 
 function base64UrlEncode(input) {
   return Buffer.from(input)
@@ -393,23 +439,106 @@ function formatRequestedDateLabel(date, timeZone) {
   }).format(date);
 }
 
-function parseRequestedDate(question) {
-  const text = normalizeText(question);
-  const dateMatch = text.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/);
-  if (!dateMatch) {
-    return null;
+function resolveSpokenDateYear(month, day, explicitYear) {
+  if (explicitYear) {
+    return explicitYear < 100 ? 2000 + explicitYear : explicitYear;
   }
 
-  const month = Number(dateMatch[1]);
-  const day = Number(dateMatch[2]);
-  const yearValue = Number(dateMatch[3]);
-  const year = yearValue < 100 ? 2000 + yearValue : yearValue;
+  const now = new Date();
+  let year = now.getFullYear();
+  const today = new Date(year, now.getMonth(), now.getDate()).getTime();
+  const candidate = new Date(year, month - 1, day).getTime();
 
+  if (candidate < today) {
+    year += 1;
+  }
+
+  return year;
+}
+
+function buildRequestedDateParts({ year, month, day }) {
   if (!month || !day || !year) {
     return null;
   }
 
+  const candidate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    candidate.getUTCFullYear() !== year ||
+    candidate.getUTCMonth() !== month - 1 ||
+    candidate.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
   return { year, month, day };
+}
+
+function resolveRequestedWeekday(weekdayIndex, qualifier) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let daysUntil = (weekdayIndex - today.getDay() + 7) % 7;
+
+  if (daysUntil === 0 && qualifier !== "today") {
+    daysUntil = 7;
+  }
+
+  const date = new Date(today);
+  date.setDate(today.getDate() + daysUntil);
+
+  return {
+    year: date.getFullYear(),
+    month: date.getMonth() + 1,
+    day: date.getDate(),
+  };
+}
+
+function parseRequestedDate(question) {
+  const text = normalizeText(question);
+  const dateMatch = text.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/);
+  if (dateMatch) {
+    const month = Number(dateMatch[1]);
+    const day = Number(dateMatch[2]);
+    const yearValue = Number(dateMatch[3]);
+    const year = yearValue < 100 ? 2000 + yearValue : yearValue;
+
+    return buildRequestedDateParts({ year, month, day });
+  }
+
+  const monthNames = Object.keys(MONTH_NAME_TO_NUMBER).join("|");
+  const monthDayMatch = text.match(
+    new RegExp(`\\b(${monthNames})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{2,4}))?\\b`, "i")
+  );
+  if (monthDayMatch) {
+    const month = MONTH_NAME_TO_NUMBER[monthDayMatch[1].toLowerCase()];
+    const day = Number(monthDayMatch[2]);
+    const explicitYear = monthDayMatch[3] ? Number(monthDayMatch[3]) : null;
+    const year = resolveSpokenDateYear(month, day, explicitYear);
+
+    return buildRequestedDateParts({ year, month, day });
+  }
+
+  const dayMonthMatch = text.match(
+    new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${monthNames})\\.?\\s*(\\d{2,4})?\\b`, "i")
+  );
+  if (dayMonthMatch) {
+    const day = Number(dayMonthMatch[1]);
+    const month = MONTH_NAME_TO_NUMBER[dayMonthMatch[2].toLowerCase()];
+    const explicitYear = dayMonthMatch[3] ? Number(dayMonthMatch[3]) : null;
+    const year = resolveSpokenDateYear(month, day, explicitYear);
+
+    return buildRequestedDateParts({ year, month, day });
+  }
+
+  const weekdayNames = Object.keys(WEEKDAY_NAME_TO_INDEX).join("|");
+  const weekdayMatch = text.match(
+    new RegExp(`\\b(?:(next|this|coming)\\s+)?(${weekdayNames})\\b`, "i")
+  );
+  if (weekdayMatch) {
+    const weekdayIndex = WEEKDAY_NAME_TO_INDEX[weekdayMatch[2].toLowerCase()];
+    return resolveRequestedWeekday(weekdayIndex, weekdayMatch[1]?.toLowerCase() || "");
+  }
+
+  return null;
 }
 
 function parseRequestedTime(question) {
@@ -537,13 +666,28 @@ async function graphJson(path, accessToken, init = {}) {
   return payload;
 }
 
-function toGraphDateTime(value) {
+function toGraphLocalDateTime(value, timeZone = DEFAULT_TIMEZONE) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return null;
   }
 
-  return date.toISOString().replace(/\.\d{3}Z$/, "");
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(date)
+      .map((part) => [part.type, part.value])
+  );
+
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
 function normalizeAttendees(attendees) {
@@ -580,9 +724,10 @@ function normalizeAttendees(attendees) {
 
 export async function createCalendarEvent(accessToken, event, options = {}) {
   const subject = normalizeText(event?.title || event?.subject);
-  const startDateTime = toGraphDateTime(event?.startAt);
-  const endDateTime = toGraphDateTime(event?.endAt);
-  const timeZone = normalizeText(options.timeZone) || "UTC";
+  const localTimeZone = normalizeText(options.localTimeZone) || DEFAULT_TIMEZONE;
+  const startDateTime = toGraphLocalDateTime(event?.startAt, localTimeZone);
+  const endDateTime = toGraphLocalDateTime(event?.endAt, localTimeZone);
+  const timeZone = normalizeText(options.timeZone) || DEFAULT_GRAPH_EVENT_TIMEZONE;
 
   if (!subject || !startDateTime || !endDateTime) {
     throw new Error("A title, start time, and end time are required to create an Outlook calendar event.");
@@ -694,8 +839,8 @@ export async function findNearestAvailability(accessToken, options = {}) {
     body: JSON.stringify({
       schedules: [scheduleAddress],
       startTime: {
-        dateTime: startUtc.toISOString(),
-        timeZone: "UTC",
+      dateTime: startUtc.toISOString(),
+      timeZone: "UTC",
       },
       endTime: {
         dateTime: endUtc.toISOString(),

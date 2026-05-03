@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   makeCall,
   initializeSIPClient,
@@ -16,12 +16,18 @@ import {
   AUDIO_OUTPUT_DEVICE_STORAGE_KEY,
   RING_OUTPUT_DEVICE_STORAGE_KEY,
 } from "@/lib/sipClient";
-import { fetchContactData } from "@/lib/glassHiveService";
-import { requestDesktopWindowState } from "@/lib/desktopBridge";
+import { fetchContactData } from "@/lib/contactLookupService";
+import { navigateWithDesktopWindowState } from "@/lib/desktopBridge";
 import { createAssemblyAiLiveTranscriber } from "@/lib/assemblyAiLiveTranscription";
 import { publishLiveTranscriptSnapshot } from "@/lib/liveTranscriptBridge";
+import { createLocalCallRecorder } from "@/lib/localCallRecorder";
+import { extractQubitCommand } from "@/lib/qubitCommandDetection";
 
 const CallComponent = () => {
+  const LIVE_TRANSCRIPT_WINDOW_WIDTH = 460;
+  const LIVE_ASSISTANT_WINDOW_WIDTH = 460;
+  const LIVE_WINDOW_HEIGHT = 720;
+  const LIVE_WINDOW_GAP = 12;
   const DESKTOP_AUTO_DIAL_STORAGE_KEY = "desktopAutoDialEnabled";
   const LAST_DIALED_NUMBER_STORAGE_KEY = "lastDialedNumber";
   const POST_CALL_AI_ENABLED_STORAGE_KEY = "postCallAiEnabled";
@@ -48,6 +54,7 @@ const CallComponent = () => {
   const [shouldHighlightCallButton, setShouldHighlightCallButton] = useState(false);
   const [liveTranscriptRows, setLiveTranscriptRows] = useState([]);
   const [liveTranscriptState, setLiveTranscriptState] = useState("idle");
+  const [lastQubitCommand, setLastQubitCommand] = useState(null);
   const [licensePrompt, setLicensePrompt] = useState(null);
   const [audioInputDevices, setAudioInputDevices] = useState([]);
   const [audioOutputDevices, setAudioOutputDevices] = useState([]);
@@ -58,12 +65,20 @@ const CallComponent = () => {
   const startOutgoingCallRef = useRef(null);
   const desktopAutoDialEnabledRef = useRef(false);
   const liveTranscriberRef = useRef(null);
+  const localRecorderRef = useRef(null);
   const latestCallMediaRef = useRef({
     localStream: null,
     remoteStream: null,
   });
   const liveTranscriptBufferRef = useRef(new Map());
   const transcriptWindowRef = useRef(null);
+  const assistantWindowRef = useRef(null);
+  const openTranscriptWindowRef = useRef(null);
+  const openAssistantWindowRef = useRef(null);
+  const voiceIqAssistantEnabledRef = useRef(false);
+  const handledQubitCommandKeysRef = useRef(new Set());
+  const pendingQubitWakeRef = useRef(null);
+  const qubitCommandHandlerRef = useRef(null);
 
   const emitDialerLog = (message, payload = null) => {
     if (typeof window === "undefined") {
@@ -104,7 +119,7 @@ const CallComponent = () => {
     setLiveTranscriptRows(rows);
   };
 
-  const getUserDetails = () => {
+  const getUserDetails = useCallback(() => {
     if (typeof window === "undefined") {
       return null;
     }
@@ -115,6 +130,33 @@ const CallComponent = () => {
       console.warn("Unable to parse userDetails for feature licensing:", error);
       return null;
     }
+  }, []);
+
+  const buildRecordingMetadata = useCallback(() => {
+    const userDetails = getUserDetails();
+    const sessionId =
+      typeof window !== "undefined" ? window.__voiceIqRecordingSessionId : "";
+
+    return {
+      callLogId: sessionId,
+      twAccountSid: userDetails?.twAccountSid || "",
+      userId: userDetails?.UserId || userDetails?.userId || "",
+      email: userDetails?.Email || "",
+      format: "mp3",
+    };
+  }, [getUserDetails]);
+
+  const createRecordingSessionId = () => {
+    const sessionId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? `call-${crypto.randomUUID()}`
+        : `call-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    if (typeof window !== "undefined") {
+      window.__voiceIqRecordingSessionId = sessionId;
+    }
+
+    return sessionId;
   };
 
   const hasLiveTranscriptLicense = () => {
@@ -179,13 +221,150 @@ const CallComponent = () => {
 
   const resetLiveTranscriptSession = () => {
     liveTranscriptBufferRef.current = new Map();
+    handledQubitCommandKeysRef.current = new Set();
+    pendingQubitWakeRef.current = null;
     setLiveTranscriptRows([]);
     setLiveTranscriptState("idle");
+    setLastQubitCommand(null);
 
     if (typeof window !== "undefined") {
       window.__liveCallTranscript = [];
     }
   };
+
+  const publishQubitCommand = ({ question, sourceTurn, transcript }) => {
+    const normalizedQuestion = String(question || "").trim();
+    if (!normalizedQuestion || !sourceTurn) {
+      return;
+    }
+
+    const commandKey = `${sourceTurn.turnOrder}:${normalizedQuestion.toLowerCase()}`;
+    if (handledQubitCommandKeysRef.current.has(commandKey)) {
+      return;
+    }
+
+    handledQubitCommandKeysRef.current.add(commandKey);
+
+    const command = {
+      id: `qubit-${sourceTurn.turnOrder}-${Date.now()}`,
+      keyword: "Qubit",
+      question: normalizedQuestion,
+      sourceText: sourceTurn.transcript,
+      speakerLabel: sourceTurn.speakerLabel || "UNKNOWN",
+      turnOrder: sourceTurn.turnOrder,
+      transcript,
+      createdAt: new Date().toISOString(),
+    };
+
+    setLastQubitCommand(command);
+    openTranscriptWindow();
+    emitDialerLog("Qubit voice command detected.", {
+      question: normalizedQuestion,
+      turnOrder: sourceTurn.turnOrder,
+    });
+  };
+
+  const handleQubitCommandTurn = ({ turnEntry, transcript }) => {
+    if (!voiceIqAssistantEnabledRef.current || !turnEntry?.endOfTurn) {
+      return;
+    }
+
+    const extracted = extractQubitCommand(turnEntry.transcript);
+    if (extracted) {
+      if (extracted.command) {
+        pendingQubitWakeRef.current = null;
+        publishQubitCommand({
+          question: extracted.command,
+          sourceTurn: turnEntry,
+          transcript,
+        });
+        return;
+      }
+
+      pendingQubitWakeRef.current = {
+        turnOrder: turnEntry.turnOrder,
+        createdAt: Date.now(),
+      };
+      return;
+    }
+
+    const pendingWake = pendingQubitWakeRef.current;
+    if (
+      pendingWake &&
+      turnEntry.turnOrder > pendingWake.turnOrder &&
+      Date.now() - pendingWake.createdAt < 15000
+    ) {
+      pendingQubitWakeRef.current = null;
+      publishQubitCommand({
+        question: turnEntry.transcript,
+        sourceTurn: turnEntry,
+        transcript,
+      });
+    }
+  };
+
+  qubitCommandHandlerRef.current = handleQubitCommandTurn;
+
+  const stopLocalRecording = async () => {
+    const recorder = localRecorderRef.current;
+    if (!recorder) {
+      return null;
+    }
+
+    localRecorderRef.current = null;
+
+    try {
+      return await recorder.stop();
+    } catch (error) {
+      console.error("Unable to finalize local call recording:", error);
+      return null;
+    }
+  };
+
+  const getLiveWindowLayout = () => {
+    if (typeof window === "undefined") {
+      return {
+        transcriptLeft: 80,
+        assistantLeft: 80 + LIVE_TRANSCRIPT_WINDOW_WIDTH + LIVE_WINDOW_GAP,
+        top: 80,
+        height: LIVE_WINDOW_HEIGHT,
+      };
+    }
+
+    const screenLeft = Number(window.screen?.availLeft ?? window.screenX ?? 0);
+    const screenTop = Number(window.screen?.availTop ?? window.screenY ?? 0);
+    const screenWidth = Number(window.screen?.availWidth ?? window.screen?.width ?? 1200);
+    const screenHeight = Number(window.screen?.availHeight ?? window.screen?.height ?? 800);
+    const combinedWidth =
+      LIVE_TRANSCRIPT_WINDOW_WIDTH + LIVE_WINDOW_GAP + LIVE_ASSISTANT_WINDOW_WIDTH;
+    const transcriptLeft = Math.max(
+      screenLeft,
+      screenLeft + Math.floor((screenWidth - combinedWidth) / 2)
+    );
+    const top = Math.max(screenTop, screenTop + Math.floor((screenHeight - LIVE_WINDOW_HEIGHT) / 2));
+
+    return {
+      transcriptLeft,
+      assistantLeft: transcriptLeft + LIVE_TRANSCRIPT_WINDOW_WIDTH + LIVE_WINDOW_GAP,
+      top,
+      height: Math.min(LIVE_WINDOW_HEIGHT, Math.max(520, screenHeight - 48)),
+    };
+  };
+
+  const buildPopupFeatures = ({ width, height, left, top, scrollbars = "yes" }) =>
+    [
+      "popup=yes",
+      "toolbar=no",
+      "menubar=no",
+      "location=no",
+      "status=no",
+      `scrollbars=${scrollbars}`,
+      "resizable=yes",
+      `width=${width}`,
+      `height=${height}`,
+      `left=${Math.max(0, Math.round(left))}`,
+      `top=${Math.max(0, Math.round(top))}`,
+    ].join(",");
 
   const openTranscriptWindow = () => {
     if (typeof window === "undefined") {
@@ -193,26 +372,25 @@ const CallComponent = () => {
     }
 
     if (transcriptWindowRef.current && !transcriptWindowRef.current.closed) {
+      const layout = getLiveWindowLayout();
+      transcriptWindowRef.current.moveTo?.(layout.transcriptLeft, layout.top);
+      transcriptWindowRef.current.resizeTo?.(LIVE_TRANSCRIPT_WINDOW_WIDTH, layout.height);
       transcriptWindowRef.current.focus();
       return;
     }
 
-    const features = [
-      "popup=yes",
-      "toolbar=no",
-      "menubar=no",
-      "location=no",
-      "status=no",
-      "scrollbars=no",
-      "resizable=yes",
-      "width=460",
-      "height=720",
-    ].join(",");
+    const layout = getLiveWindowLayout();
 
     transcriptWindowRef.current = window.open(
       "/live-transcript",
       "voiceiq-live-transcript",
-      features
+      buildPopupFeatures({
+        width: LIVE_TRANSCRIPT_WINDOW_WIDTH,
+        height: layout.height,
+        left: layout.transcriptLeft,
+        top: layout.top,
+        scrollbars: "no",
+      })
     );
   };
 
@@ -224,6 +402,44 @@ const CallComponent = () => {
     transcriptWindowRef.current = null;
   };
 
+  const openAssistantWindow = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (assistantWindowRef.current && !assistantWindowRef.current.closed) {
+      const layout = getLiveWindowLayout();
+      assistantWindowRef.current.moveTo?.(layout.assistantLeft, layout.top);
+      assistantWindowRef.current.resizeTo?.(LIVE_ASSISTANT_WINDOW_WIDTH, layout.height);
+      assistantWindowRef.current.focus();
+      return;
+    }
+
+    const layout = getLiveWindowLayout();
+
+    assistantWindowRef.current = window.open(
+      "/live-transcript-assistant",
+      "voiceiq-live-transcript-assistant",
+      buildPopupFeatures({
+        width: LIVE_ASSISTANT_WINDOW_WIDTH,
+        height: layout.height,
+        left: layout.assistantLeft,
+        top: layout.top,
+      })
+    );
+  };
+
+  openTranscriptWindowRef.current = openTranscriptWindow;
+  openAssistantWindowRef.current = openAssistantWindow;
+
+  const closeAssistantWindow = () => {
+    if (assistantWindowRef.current && !assistantWindowRef.current.closed) {
+      assistantWindowRef.current.close();
+    }
+
+    assistantWindowRef.current = null;
+  };
+
   const populateDialer = async (number) => {
     setPhoneNumber(number || "");
 
@@ -232,13 +448,13 @@ const CallComponent = () => {
       return;
     }
 
-    console.log("Fetching contacts for", number);
+    console.log("Checking local contact match for", number);
     const data = await fetchContactData(number);
     if (data && data.length) {
       setContacts(data);
     } else {
       setContacts([]);
-      console.log("No contacts found.");
+      console.log("No matching contact found.");
     }
   };
 
@@ -383,10 +599,17 @@ const CallComponent = () => {
     setCallConfirmed(true);
     setActiveCallDigits("");
     setShouldHighlightCallButton(false);
+    const recordingSessionId = createRecordingSessionId();
     setIsCallActive(true);
-    if (liveTranscriptEnabled) {
+    if (liveTranscriptEnabled || postCallAiEnabled) {
       resetLiveTranscriptSession();
-      openTranscriptWindow();
+    }
+
+    if (liveTranscriptEnabled) {
+      openTranscriptWindowRef.current?.();
+    }
+    if (voiceIqAssistantEnabled) {
+      openAssistantWindow();
     }
 
     emitDialerLog("Starting outgoing call.", {
@@ -400,11 +623,13 @@ const CallComponent = () => {
       contact: options.contact ?? null,
       phoneNumber: number,
       postCallEnabled: postCallAiEnabled,
+      recordingSessionId,
     });
   };
 
   startOutgoingCallRef.current = startOutgoingCall;
   desktopAutoDialEnabledRef.current = desktopAutoDialEnabled;
+  voiceIqAssistantEnabledRef.current = voiceIqAssistantEnabled;
 
   useEffect(() => {
     initializeSIPClient();
@@ -486,6 +711,7 @@ const CallComponent = () => {
       POST_CALL_AI_ENABLED_STORAGE_KEY,
       postCallAiEnabled ? "1" : "0"
     );
+    window.__voiceIqPostCallAiEnabled = postCallAiEnabled;
   }, [postCallAiEnabled]);
 
   useEffect(() => {
@@ -582,9 +808,17 @@ const CallComponent = () => {
       transcript,
       liveTranscriptEnabled,
       voiceIqAssistantEnabled,
+      voiceCommand: lastQubitCommand,
       updatedAt: new Date().toISOString(),
     });
-  }, [isCallActive, liveTranscriptRows, liveTranscriptState, liveTranscriptEnabled, voiceIqAssistantEnabled]);
+  }, [
+    isCallActive,
+    liveTranscriptRows,
+    liveTranscriptState,
+    liveTranscriptEnabled,
+    voiceIqAssistantEnabled,
+    lastQubitCommand,
+  ]);
 
   useEffect(() => {
     const handleCallMediaStreams = async (event) => {
@@ -600,6 +834,8 @@ const CallComponent = () => {
           console.error("Failed to update live transcription media streams:", error);
         }
       }
+
+      localRecorderRef.current?.updateMediaStreams(latestCallMediaRef.current);
     };
 
     const handleCallLiveState = async (event) => {
@@ -610,6 +846,7 @@ const CallComponent = () => {
       }
 
       if (event.detail?.active === false) {
+        await stopLocalRecording();
         setIsCallActive(false);
         setIsMuted(false);
         setIsOnHold(false);
@@ -629,9 +866,39 @@ const CallComponent = () => {
   }, []);
 
   useEffect(() => {
+    if (!isCallActive) {
+      stopLocalRecording();
+      return undefined;
+    }
+
+    if (localRecorderRef.current || typeof window === "undefined") {
+      return undefined;
+    }
+
+    const sessionId =
+      window.__voiceIqRecordingSessionId ||
+      `call-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    window.__voiceIqRecordingSessionId = sessionId;
+
+    localRecorderRef.current = createLocalCallRecorder({
+      sessionId,
+      getMetadata: buildRecordingMetadata,
+      onStatus: (event) => {
+        emitDialerLog("Local recording status changed.", event);
+      },
+    });
+
+    localRecorderRef.current.updateMediaStreams(latestCallMediaRef.current);
+
+    return undefined;
+  }, [buildRecordingMetadata, isCallActive]);
+
+  useEffect(() => {
     let isCancelled = false;
 
-    if (!isCallActive || !liveTranscriptEnabled) {
+    const shouldCaptureTranscript = liveTranscriptEnabled || postCallAiEnabled;
+
+    if (!isCallActive || !shouldCaptureTranscript) {
       const stopExisting = async () => {
         if (liveTranscriberRef.current) {
           await liveTranscriberRef.current.stop();
@@ -643,7 +910,9 @@ const CallComponent = () => {
       return undefined;
     }
 
-    openTranscriptWindow();
+    if (liveTranscriptEnabled) {
+      openTranscriptWindowRef.current?.();
+    }
 
     const startLiveTranscription = async () => {
       try {
@@ -669,6 +938,11 @@ const CallComponent = () => {
             const transcriptPreview = [...nextBuffer.values()].sort(
               (left, right) => left.turnOrder - right.turnOrder
             );
+
+            qubitCommandHandlerRef.current?.({
+              turnEntry: nextBuffer.get(turn.turn_order),
+              transcript: transcriptPreview,
+            });
 
             window.__liveCallTranscript = transcriptPreview;
             console.log("AssemblyAI live transcript buffer:", transcriptPreview);
@@ -725,17 +999,25 @@ const CallComponent = () => {
 
       stopTranscriber();
     };
-  }, [isCallActive, liveTranscriptEnabled]);
+  }, [isCallActive, liveTranscriptEnabled, postCallAiEnabled]);
 
   const handleAnswer = () => {
     if (incomingCall) {
-      if (liveTranscriptEnabled) {
+      const recordingSessionId = createRecordingSessionId();
+      if (liveTranscriptEnabled || postCallAiEnabled) {
         resetLiveTranscriptSession();
+      }
+
+      if (liveTranscriptEnabled) {
         openTranscriptWindow();
+      }
+      if (voiceIqAssistantEnabled) {
+        openAssistantWindow();
       }
       answerCall(incomingCall, {
         phoneNumber: incomingCall.remote_identity?.uri?.user ?? "",
         postCallEnabled: postCallAiEnabled,
+        recordingSessionId,
       });
       setIsCallActive(true);
       setActiveCallDigits("");
@@ -863,6 +1145,7 @@ const CallComponent = () => {
     if (liveTranscriptEnabled) {
       setLiveTranscriptEnabled(false);
       setVoiceIqAssistantEnabled(false);
+      closeAssistantWindow();
       closeTranscriptWindow();
       emitDialerLog("Live transcript disabled from dialer toggle.", {
         assistantDisabled: true,
@@ -880,6 +1163,7 @@ const CallComponent = () => {
   const handleVoiceIqAssistantToggle = () => {
     if (voiceIqAssistantEnabled) {
       setVoiceIqAssistantEnabled(false);
+      closeAssistantWindow();
       emitDialerLog("VoiceIQ Assistant disabled from dialer toggle.");
       return;
     }
@@ -889,6 +1173,11 @@ const CallComponent = () => {
       enableLiveTranscript: true,
       enableVoiceIqAssistant: true,
     });
+
+    if (hasLiveTranscriptLicense()) {
+      openTranscriptWindow();
+      openAssistantWindow();
+    }
   };
 
   const pfkButtons = [
@@ -957,13 +1246,8 @@ const CallComponent = () => {
 
   const handleClear = () => {
     closeTranscriptWindow();
+    closeAssistantWindow();
     window.location.href = '/';
-  };
-
-  const handleGoToContact = () => {
-    if (selectedContact) {
-      window.location.href = `https://app.glasshive.com/Contacts/${selectedContact.Id}#Activities`;
-    }
   };
 
   const handleGearClick = () => {
@@ -971,13 +1255,19 @@ const CallComponent = () => {
   };
 
   const handleOpenCallLogs = () => {
-    requestDesktopWindowState("maximized", "call-logs");
-    window.location.href = "/call-logs";
+    navigateWithDesktopWindowState({
+      href: "/call-logs",
+      state: "maximized",
+      view: "call-logs",
+    });
   };
 
   const handleOpenProfile = () => {
-    requestDesktopWindowState("maximized", "profile");
-    window.location.href = "/profile";
+    navigateWithDesktopWindowState({
+      href: "/profile",
+      state: "maximized",
+      view: "profile",
+    });
   };
 
   const handleAudioInputDeviceChange = async (deviceId) => {
@@ -1146,7 +1436,6 @@ const CallComponent = () => {
               <div className="call-ended">
                 <p>Call ended</p>
                 <button className="clear-button" onClick={handleClear}>Clear</button>
-                <button className="go-to-contact-button" onClick={handleGoToContact}>Go to Contact</button>
               </div>
             )}
 

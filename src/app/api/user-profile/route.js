@@ -40,7 +40,6 @@ function normalizeUserProfile(item) {
     lastName: item.LastName || "",
     email: item.Email || "",
     companyId: item.CompanyId || "",
-    ghUserId: item.GHUserId || "",
     outboundNumber: item.OutboundNumber || "",
     dateCreated: item.DateCreated || "",
     hasPassword: Boolean(item.Password),

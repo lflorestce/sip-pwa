@@ -6,7 +6,6 @@ import Confetti from "react-confetti";
 
 export default function Register() {
   const [companyData, setCompanyData] = useState({
-    GHToken: "",
     CompanyName: "",
     FriendlyName: "",
     Address1: "",
@@ -17,7 +16,6 @@ export default function Register() {
   });
 
   const [userData, setUserData] = useState({
-    GHUserId: "",
     FirstName: "",
     LastName: "",
     Email: "",
@@ -26,7 +24,6 @@ export default function Register() {
     OutboundNumber: "",
   });
 
-  const [glassHiveUsers, setGlassHiveUsers] = useState([]);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [passwordStrength, setPasswordStrength] = useState("Weak");
@@ -52,32 +49,6 @@ export default function Register() {
     setUserData({ ...userData, [e.target.name]: e.target.value });
   };
 
-  const handleGHUserChange = (e) => {
-    const selectedUserId = e.target.value;
-    const selectedUser = glassHiveUsers.find((user) => user.Id === selectedUserId);
-    setUserData((prevData) => ({
-      ...prevData,
-      GHUserId: selectedUserId,
-      FirstName: selectedUser?.FirstName || "",
-      LastName: selectedUser?.LastName || "",
-      Email: selectedUser?.Email || "",
-    }));
-  };
-
-  const handleFetchGlassHiveUsers = async () => {
-    setError(null);
-    setSuccess(null);
-    try {
-      const response = await axios.post(
-        "https://click-to-dial-3252.twil.io/get-glasshive-users",
-        { GHToken: companyData.GHToken }
-      );
-      setGlassHiveUsers(response.data.users);
-    } catch (err) {
-      setError(err.response?.data?.error || "Failed to fetch GlassHive users.");
-    }
-  };
-
   const handlePasswordChange = (e) => {
     const password = e.target.value;
     setUserData({ ...userData, Password: password });
@@ -99,15 +70,15 @@ export default function Register() {
     setSuccess(null);
     try {
       const companyResponse = await axios.post(
-        "https://click-to-dial-3252.twil.io/create-company",
+        "/api/create-company",
         companyData
       );
       const companyId = companyResponse.data?.CustomerId;
       if (!companyId) throw new Error("CompanyId not returned from create-company.");
 
       const userResponse = await axios.post(
-        "https://click-to-dial-3252.twil.io/create-user",
-        { ...userData, CompanyId: companyId, GHToken: companyData.GHToken }
+        "/api/create-user",
+        { ...userData, CompanyId: companyId }
       );
       setSuccess(userResponse.data.message);
       setShowConfetti(true);
@@ -129,36 +100,6 @@ export default function Register() {
         <h1>Register</h1>
         <form onSubmit={handleSubmit}>
           <h3>Company Details</h3>
-          <input
-            type="text"
-            name="GHToken"
-            placeholder="GlassHive Token"
-            value={companyData.GHToken}
-            onChange={handleCompanyChange}
-            required
-          />
-          <button type="button" onClick={handleFetchGlassHiveUsers}>
-            Fetch GlassHive Users
-          </button>
-
-          {glassHiveUsers.length > 0 && (
-            <select
-              name="GHUserId"
-              value={userData.GHUserId}
-              onChange={handleGHUserChange}
-              required
-            >
-              <option value="" disabled>
-                Select GlassHive User
-              </option>
-              {glassHiveUsers.map((user) => (
-                <option key={user.Id} value={user.Id}>
-                  {user.FirstName} {user.LastName}
-                </option>
-              ))}
-            </select>
-          )}
-
           <input
             type="text"
             name="CompanyName"

@@ -1083,6 +1083,68 @@
   min-height: 480px;
 }
 
+.insightsQubitHeader {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 14px;
+  border-radius: 22px;
+  border: 1px solid rgba(207, 220, 240, 0.9);
+  background:
+    radial-gradient(circle at 14% 32%, rgba(111, 177, 255, 0.2), transparent 34%),
+    linear-gradient(135deg, #ffffff, #eef5ff);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.72), 0 12px 26px rgba(46, 84, 126, 0.08);
+}
+
+.insightsQubitAvatarWrap {
+  width: 96px;
+  height: 96px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  background: radial-gradient(circle at 50% 38%, rgba(0, 209, 255, 0.2), rgba(255, 255, 255, 0.1) 68%);
+  overflow: hidden;
+}
+
+.insightsQubitAvatar {
+  width: 92px;
+  height: 92px;
+  object-fit: contain;
+  filter: drop-shadow(0 10px 16px rgba(20, 48, 82, 0.22));
+  animation: insightsQubitStateGlow 1.1s ease-out;
+}
+
+.insightsQubitThinking,
+.insightsQubitSuggesting {
+  --insights-qubit-glow: rgba(0, 209, 255, 0.72);
+}
+
+.insightsQubitSupporting {
+  --insights-qubit-glow: rgba(34, 197, 94, 0.62);
+}
+
+.insightsQubitCelebrating {
+  --insights-qubit-glow: rgba(250, 204, 21, 0.72);
+}
+
+.insightsQubitAlerting {
+  --insights-qubit-glow: rgba(248, 113, 113, 0.72);
+}
+
+.insightsQubitCopy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.insightsQubitCopy strong {
+  color: #17385d;
+  font-size: 30px;
+  line-height: 1;
+}
+
 .chatStream {
   display: flex;
   flex-direction: column;
@@ -1230,6 +1292,27 @@
   cursor: not-allowed;
 }
 
+@keyframes insightsQubitStateGlow {
+  0% {
+    filter:
+      drop-shadow(0 10px 16px rgba(20, 48, 82, 0.22))
+      drop-shadow(0 0 0 rgba(0, 209, 255, 0));
+    transform: scale(0.98);
+  }
+  35% {
+    filter:
+      drop-shadow(0 10px 16px rgba(20, 48, 82, 0.22))
+      drop-shadow(0 0 24px var(--insights-qubit-glow));
+    transform: scale(1.035);
+  }
+  100% {
+    filter:
+      drop-shadow(0 10px 16px rgba(20, 48, 82, 0.22))
+      drop-shadow(0 0 0 rgba(0, 209, 255, 0));
+    transform: scale(1);
+  }
+}
+
 @media (max-width: 1180px) {
   .page {
     grid-template-columns: 1fr;
@@ -1273,6 +1356,25 @@
   .chatBubbleUser,
   .chatBubbleAssistant {
     max-width: 100%;
+  }
+
+  .insightsQubitHeader {
+    grid-template-columns: 82px minmax(0, 1fr);
+  }
+
+  .insightsQubitAvatarWrap {
+    width: 82px;
+    height: 82px;
+  }
+
+  .insightsQubitAvatar {
+    width: 78px;
+    height: 78px;
+  }
+
+  .insightsQubitHeader .readyPill {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 
   .recordModal {

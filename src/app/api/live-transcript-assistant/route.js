@@ -213,7 +213,10 @@ async function generateAssistantReply({ question, transcript, history }) {
         "If the operator explicitly asks for a downloadable calendar invite, ICS file, meeting invite, or appointment file, " +
         "and the transcript contains enough detail for a specific event title plus start and end time, you may return one ICS attachment. " +
         "If the operator explicitly asks to create, book, schedule, or add an Outlook calendar event, return one calendarEvents item when the transcript, recent chat history, or question contains a specific title plus start and end time. " +
-        "Use ISO 8601 datetimes with timezone offsets for startAt and endAt. If required event details are missing, do not create an attachment or calendar event.",
+        "When recent chat history contains a Structured availability slot and the operator asks to schedule this/that slot, use that exact slot for startAt and endAt. " +
+        `Use ${DEFAULT_TIMEZONE} local wall-clock times for calendarEvents, and make startAt/endAt match the exact local time stated in your answer. ` +
+        "For example, if you say 10:00 AM CDT, return 10:00 AM Central time, not the UTC conversion as the local hour. " +
+        "If required event details are missing, do not create an attachment or calendar event.",
       text: {
         format: {
           type: "json_schema",
@@ -391,6 +394,15 @@ export async function POST(request) {
         {
           answer: buildAvailabilityAnswerForQuestion(slot, durationMinutes, searchOptions),
           attachments: [],
+          availabilitySlot: slot
+            ? {
+                startAt: slot.startAt,
+                endAt: slot.endAt,
+                label: slot.label,
+                timeZone: slot.timeZone,
+                durationMinutes: slot.durationMinutes,
+              }
+            : null,
         },
         { status: 200 }
       );
@@ -462,7 +474,9 @@ export async function POST(request) {
     const createdEvents = [];
 
     for (const calendarEvent of reply.calendarEvents.slice(0, 1)) {
-      const createdEvent = await createCalendarEvent(refreshed.accessToken, calendarEvent);
+      const createdEvent = await createCalendarEvent(refreshed.accessToken, calendarEvent, {
+        localTimeZone: DEFAULT_TIMEZONE,
+      });
       createdEvents.push({
         title: createdEvent?.subject || calendarEvent.title,
         webLink: createdEvent?.webLink || "",

@@ -2,7 +2,11 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { requestDesktopWindowState } from "@/lib/desktopBridge";
+import {
+  applyRememberedDesktopWindowState,
+  navigateWithDesktopWindowState,
+  requestDesktopWindowState,
+} from "@/lib/desktopBridge";
 import styles from "./page.module.css";
 
 const NAV_ITEMS = [
@@ -48,6 +52,7 @@ export default function ProfileClient() {
   });
 
   useEffect(() => {
+    applyRememberedDesktopWindowState();
     requestDesktopWindowState("maximized", "profile");
 
     const authToken = localStorage.getItem("authToken");
@@ -182,7 +187,6 @@ export default function ProfileClient() {
       email: profile?.email || localUserDetails?.Email || "",
       userId: profile?.userId || localUserDetails?.UserId || localUserDetails?.userId || "",
       companyId: profile?.companyId || localUserDetails?.CompanyId || "",
-      ghUserId: profile?.ghUserId || localUserDetails?.GHUserId || localUserDetails?.ghUserID || "",
       outboundNumber: profile?.outboundNumber || localUserDetails?.OutboundNumber || "",
       dateCreated: profile?.dateCreated || localUserDetails?.DateCreated || "",
       hasPassword: profile?.hasPassword ?? Boolean(localUserDetails?.Password),
@@ -192,8 +196,12 @@ export default function ProfileClient() {
   }, [localUserDetails, profile]);
 
   function handleBackToDialer() {
-    requestDesktopWindowState("normal", "dialer");
-    router.push("/");
+    navigateWithDesktopWindowState({
+      href: "/",
+      router,
+      state: "normal",
+      view: "dialer",
+    });
   }
 
   function handleConnectMicrosoft() {
@@ -304,10 +312,6 @@ export default function ProfileClient() {
               <div className={styles.miniValue}>{displayProfile?.companyId || "-"}</div>
             </div>
             <div className={styles.miniCard}>
-              <span className={styles.miniLabel}>GlassHive User</span>
-              <div className={styles.miniValue}>{displayProfile?.ghUserId || "-"}</div>
-            </div>
-            <div className={styles.miniCard}>
               <span className={styles.miniLabel}>Password On File</span>
               <div className={styles.miniValue}>{displayProfile?.hasPassword ? "Yes" : "No"}</div>
             </div>
@@ -335,10 +339,6 @@ export default function ProfileClient() {
             <label className={styles.field}>
               Company ID
               <input className={cx(styles.input, styles.readonly)} value={displayProfile?.companyId || ""} readOnly />
-            </label>
-            <label className={styles.field}>
-              GlassHive User ID
-              <input className={cx(styles.input, styles.readonly)} value={displayProfile?.ghUserId || ""} readOnly />
             </label>
             <label className={styles.field}>
               WebRTC Name

@@ -109,6 +109,44 @@ function normalizeText(value) {
   return String(value || '').trim();
 }
 
+function createCallSessionId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `call-${crypto.randomUUID()}`;
+  }
+
+  return `call-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function initializeBrowserCallSession(recordingSessionId) {
+  if (!isBrowser()) {
+    return recordingSessionId || createCallSessionId();
+  }
+
+  const resolvedSessionId = recordingSessionId || createCallSessionId();
+  window.__voiceIqRecordingSessionId = resolvedSessionId;
+  return resolvedSessionId;
+}
+
+function readBrowserPostCallAiEnabled() {
+  if (!isBrowser()) {
+    return null;
+  }
+
+  if (typeof window.__voiceIqPostCallAiEnabled === 'boolean') {
+    return window.__voiceIqPostCallAiEnabled;
+  }
+
+  const stored = window.localStorage?.getItem?.('postCallAiEnabled');
+  if (stored === '1') {
+    return true;
+  }
+  if (stored === '0') {
+    return false;
+  }
+
+  return null;
+}
+
 function buildIceServers(userDetails) {
   const stunUrl =
     normalizeText(process.env.NEXT_PUBLIC_ICE_STUN_URL) ||
@@ -323,7 +361,7 @@ export function answerCall(incomingSession, options = {}) {
   starttime = new Date();
   activeCallFinalized = false;
   currentCallContext = {
-    ghContact: options.contact ?? null,
+    recordingSessionId: initializeBrowserCallSession(options.recordingSessionId),
     phoneNumber: options.phoneNumber ?? incomingSession.remote_identity?.uri?.user ?? '',
     postCallEnabled: !!options.postCallEnabled,
   };
@@ -452,7 +490,7 @@ export async function makeCall(target, options = {}) {
   starttime = new Date();
   activeCallFinalized = false;
   currentCallContext = {
-    ghContact: options.contact ?? null,
+    recordingSessionId: initializeBrowserCallSession(options.recordingSessionId),
     phoneNumber: options.phoneNumber ?? target,
     postCallEnabled: !!options.postCallEnabled,
   };
@@ -621,20 +659,23 @@ function registerSessionEvents(activeSession, callContext) {
 
 function resolveCallContext(callContextOverride) {
   const source = callContextOverride ?? currentCallContext ?? {};
+  const browserPostCallEnabled = readBrowserPostCallAiEnabled();
 
   if (typeof source === 'string') {
     return {
-      ghContact: null,
       phoneNumber: source,
-      postCallEnabled: false,
+      postCallEnabled: browserPostCallEnabled ?? false,
+      recordingSessionId: isBrowser() ? window.__voiceIqRecordingSessionId : '',
     };
   }
 
-  const contact = source.contact ?? source.ghContact ?? null;
   return {
-    ghContact: contact,
-    phoneNumber: source.phoneNumber ?? contact?.Phone ?? '',
-    postCallEnabled: !!source.postCallEnabled,
+    phoneNumber: source.phoneNumber ?? source.contact?.Phone ?? source.ghContact?.Phone ?? '',
+    postCallEnabled:
+      browserPostCallEnabled !== null ? browserPostCallEnabled : !!source.postCallEnabled,
+    recordingSessionId:
+      source.recordingSessionId ||
+      (isBrowser() ? window.__voiceIqRecordingSessionId : ''),
   };
 }
 
@@ -675,23 +716,15 @@ function stopCallTimer(callContext) {
   console.log(`Call ended. Duration: ${duration}`);
 
   const resolvedCallContext = resolveCallContext(callContext);
-  const ghContact = resolvedCallContext.ghContact;
-  const { Id, FirstName, LastName, Email, Phone } = ghContact || {};
-  const contactDetails = {
-    Id,
-    FirstName,
-    LastName,
-    Email,
-    Phone: Phone || resolvedCallContext.phoneNumber || '',
-  };
 
   if (starttime) {
     sendPostCallData({
       starttime: starttime.toISOString(),
       endtime,
       duration,
-      ghContact: JSON.stringify(contactDetails),
+      phoneNumber: resolvedCallContext.phoneNumber || '',
       postCallEnabled: resolvedCallContext.postCallEnabled,
+      recordingSessionId: resolvedCallContext.recordingSessionId || '',
     });
   }
 
@@ -714,25 +747,34 @@ async function ensureRegistered(target, options = {}) {
   }
 }
 
-async function sendPostCallData({ starttime, endtime, duration, ghContact, postCallEnabled }) {
+async function sendPostCallData({ starttime, endtime, duration, phoneNumber, postCallEnabled, recordingSessionId }) {
   const userDetails = getUserDetails();
   if (!userDetails) {
     console.warn('Skipping post-call data: userDetails not available.');
     return;
   }
 
+  const liveTranscript = Array.isArray(window.__liveCallTranscript)
+    ? window.__liveCallTranscript
+    : [];
+  const latestPostCallEnabled = readBrowserPostCallAiEnabled();
+  const shouldRunPostCallAi =
+    latestPostCallEnabled !== null ? latestPostCallEnabled : !!postCallEnabled;
+
   const payload = {
+    transcriptId: recordingSessionId || undefined,
+    recordingSessionId: recordingSessionId || undefined,
     starttime,
     endtime,
     duration,
     twAccountSid: userDetails.twAccountSid,
-    ghToken: userDetails.ghToken,
-    ghUserID: userDetails.ghUserID,
-    ghUserFirstName: userDetails.FirstName,
-    ghUserLastName: userDetails.LastName,
-    ghUserEmail: userDetails.Email,
-    ghContact,
-    'post-call': postCallEnabled ? 'true' : 'false',
+    firstName: userDetails.FirstName,
+    lastName: userDetails.LastName,
+    email: userDetails.Email,
+    phoneNumber,
+    liveTranscript,
+    'post-call': shouldRunPostCallAi ? 'true' : 'false',
+    postCallEnabled: shouldRunPostCallAi,
     postCallNotes: '',
     postcallOption: '',
     context: '',
@@ -742,7 +784,7 @@ async function sendPostCallData({ starttime, endtime, duration, ghContact, postC
 
   try {
     const response = await axios.post(
-      'https://click-to-dial-postcall-1443.twil.io/logcall',
+      '/api/logcall',
       payload
     );
     console.log('Post-call data sent successfully:', response.data);

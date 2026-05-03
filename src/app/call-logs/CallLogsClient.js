@@ -10,7 +10,11 @@ import {
   buildDailyVolume,
   formatDuration,
 } from "@/lib/callLogTransforms";
-import { requestDesktopWindowState } from "@/lib/desktopBridge";
+import {
+  applyRememberedDesktopWindowState,
+  navigateWithDesktopWindowState,
+  requestDesktopWindowState,
+} from "@/lib/desktopBridge";
 import styles from "./page.module.css";
 
 const NAV_ITEMS = [
@@ -51,6 +55,60 @@ const INITIAL_CHAT = [
     attachments: [],
   },
 ];
+
+const QUBIT_ASSET_BASE = "/img/qubit-svg-expressions";
+
+const QUBIT_EXPRESSIONS = {
+  alerting: {
+    src: `${QUBIT_ASSET_BASE}/qubit-alerting.svg`,
+    label: "Needs attention",
+    className: "insightsQubitAlerting",
+  },
+  celebrating: {
+    src: `${QUBIT_ASSET_BASE}/qubit-celebrating.svg`,
+    label: "Report ready",
+    className: "insightsQubitCelebrating",
+  },
+  suggesting: {
+    src: `${QUBIT_ASSET_BASE}/qubit-suggesting.svg`,
+    label: "Insight ready",
+    className: "insightsQubitSuggesting",
+  },
+  supporting: {
+    src: `${QUBIT_ASSET_BASE}/qubit-supporting.svg`,
+    label: "Standing by",
+    className: "insightsQubitSupporting",
+  },
+  thinking: {
+    src: `${QUBIT_ASSET_BASE}/qubit-thinking.svg`,
+    label: "Analyzing",
+    className: "insightsQubitThinking",
+  },
+};
+
+function getInsightsQubitExpression({ chatLoading, chatError, chatWarning, chatMessages }) {
+  if (chatError || chatWarning) {
+    return QUBIT_EXPRESSIONS.alerting;
+  }
+
+  if (chatLoading) {
+    return QUBIT_EXPRESSIONS.thinking;
+  }
+
+  const latestAssistantMessage = [...chatMessages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+
+  if (latestAssistantMessage?.attachments?.length) {
+    return QUBIT_EXPRESSIONS.celebrating;
+  }
+
+  if (latestAssistantMessage && latestAssistantMessage.id !== "welcome") {
+    return QUBIT_EXPRESSIONS.suggesting;
+  }
+
+  return QUBIT_EXPRESSIONS.supporting;
+}
 
 function formatMetricNumber(value, digits = 0) {
   return new Intl.NumberFormat("en-US", {
@@ -122,6 +180,7 @@ export default function CallLogsClient() {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    applyRememberedDesktopWindowState();
     requestDesktopWindowState("maximized", "call-logs");
   }, []);
   const [warning, setWarning] = useState("");
@@ -141,6 +200,16 @@ export default function CallLogsClient() {
   const [selectedLog, setSelectedLog] = useState(null);
   const [deleteRestrictionVisible, setDeleteRestrictionVisible] = useState(false);
   const currentCursor = cursorStack[cursorStack.length - 1];
+  const insightsQubitExpression = useMemo(
+    () =>
+      getInsightsQubitExpression({
+        chatLoading,
+        chatError,
+        chatWarning,
+        chatMessages,
+      }),
+    [chatError, chatLoading, chatMessages, chatWarning]
+  );
 
   useEffect(() => {
     const authToken = localStorage.getItem("authToken");
@@ -266,8 +335,12 @@ export default function CallLogsClient() {
   const statusBreakdown = useMemo(() => buildStatusBreakdown(logs), [logs]);
 
   function handleBackToDialer() {
-    requestDesktopWindowState("normal", "dialer");
-    router.push("/");
+    navigateWithDesktopWindowState({
+      href: "/",
+      router,
+      state: "normal",
+      view: "dialer",
+    });
   }
 
   function renderBackToDialerAction() {
@@ -767,7 +840,7 @@ export default function CallLogsClient() {
             "Operations Snapshot",
             "Insurance Agency View",
             "DashboardIQ",
-            "A more vibrant KPI layer for call performance, transcript coverage, and agent activity using the live data currently stored in DynamoDB.",
+            "A vibrant KPI layer for call performance, transcript coverage, and agent activity using live data.",
             renderBackToDialerAction()
           )}
 
@@ -909,12 +982,26 @@ export default function CallLogsClient() {
             </div>
 
             <div className={styles.chatCard}>
-              <div className={styles.chatHeader}>
-                <div>
-                  <strong>VoiceIQ Assistant</strong>
-                  <span className={styles.chatSubtle}>OpenAI-backed analytics assistant with DynamoDB context</span>
+              <div className={styles.insightsQubitHeader}>
+                <div className={styles.insightsQubitAvatarWrap} aria-hidden="true">
+                  <img
+                    key={insightsQubitExpression.src}
+                    className={cx(
+                      styles.insightsQubitAvatar,
+                      styles[insightsQubitExpression.className]
+                    )}
+                    src={insightsQubitExpression.src}
+                    alt=""
+                    width="96"
+                    height="96"
+                  />
                 </div>
-                <span className={styles.readyPill}>{chatLoading ? "Thinking" : "Ready"}</span>
+                <div className={styles.insightsQubitCopy}>
+                  <span className={styles.chatSubtle}>VoiceIQ Insights</span>
+                  <strong>Qubit</strong>
+                  <span className={styles.chatSubtle}>Analytics assistant with DynamoDB call log context</span>
+                </div>
+                <span className={styles.readyPill}>{insightsQubitExpression.label}</span>
               </div>
 
               {chatWarning ? <div className={cx(styles.message, styles.warning)}>{chatWarning}</div> : null}
@@ -926,7 +1013,7 @@ export default function CallLogsClient() {
                     key={message.id}
                     className={message.role === "user" ? styles.chatBubbleUser : styles.chatBubbleAssistant}
                   >
-                    <span className={styles.chatRole}>{message.role === "user" ? "You" : "VoiceIQ"}</span>
+                    <span className={styles.chatRole}>{message.role === "user" ? "You" : "Qubit"}</span>
                     <p className={styles.chatText}>{message.content}</p>
 
                     {message.bullets?.length ? (
@@ -956,7 +1043,7 @@ export default function CallLogsClient() {
 
                 {chatLoading ? (
                   <div className={styles.chatBubbleAssistant}>
-                    <span className={styles.chatRole}>VoiceIQ</span>
+                    <span className={styles.chatRole}>Qubit</span>
                     <p className={styles.chatText}>Reviewing the live data and preparing the response...</p>
                   </div>
                 ) : null}

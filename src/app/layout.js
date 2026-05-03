@@ -1,4 +1,7 @@
 import localFont from "next/font/local";
+import Script from "next/script";
+import DesktopBridgeDebug from "./components/DesktopBridgeDebug";
+import { desktopBridgeScript } from "@/lib/desktopBridge";
 import "./globals.css";
 
 const geistSans = localFont({
@@ -23,6 +26,12 @@ export default function RootLayout({ children }) {
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        <Script
+          id="webview2-bridge"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: desktopBridgeScript }}
+        />
+        <DesktopBridgeDebug />
         {children}
       </body>
     </html>

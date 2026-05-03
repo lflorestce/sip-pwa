@@ -171,10 +171,214 @@ export function postDesktopHostMessage(message) {
   }
 }
 
+function buildDesktopWindowStateMessages(state, view = "dialer") {
+  const normalizedState = state === "maximized" ? "maximized" : "normal";
+  const isMaximized = normalizedState === "maximized";
+  const command = isMaximized ? "maximize" : "normalize";
+  const alternateState = isMaximized ? "maximize" : "restore";
+
+  return [
+    {
+      type: "shellWindowState",
+      Type: "shellWindowState",
+      state: normalizedState,
+      State: normalizedState,
+      view,
+      View: view,
+    },
+    {
+      type: "windowState",
+      Type: "windowState",
+      state: normalizedState,
+      State: normalizedState,
+      view,
+      View: view,
+    },
+    {
+      type: "setWindowState",
+      Type: "setWindowState",
+      state: normalizedState,
+      State: normalizedState,
+      view,
+      View: view,
+    },
+    {
+      type: "resizeWindow",
+      Type: "resizeWindow",
+      state: normalizedState,
+      State: normalizedState,
+      command,
+      Command: command,
+      view,
+      View: view,
+    },
+    {
+      type: command,
+      Type: command,
+      view,
+      View: view,
+    },
+    {
+      type: "windowState",
+      Type: "windowState",
+      state: alternateState,
+      State: alternateState,
+      view,
+      View: view,
+    },
+  ];
+}
+
+function postDesktopHostMessages(messages) {
+  let sent = false;
+
+  for (const message of messages) {
+    sent = postDesktopHostMessage(message) || sent;
+
+    if (typeof window !== "undefined") {
+      try {
+        sent = postDesktopHostMessage(JSON.stringify(message)) || sent;
+      } catch {
+        // Ignore JSON fallback failures.
+      }
+    }
+  }
+
+  return sent;
+}
+
+function isLocalDesktopHost() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const hostname = window.location.hostname;
+  return (
+    !!window.chrome?.webview &&
+    (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1")
+  );
+}
+
+function requestLocalDesktopWindowState(state, view = "dialer") {
+  if (!isLocalDesktopHost()) {
+    return false;
+  }
+
+  const normalizedState = state === "maximized" ? "maximized" : "normal";
+
+  window.setTimeout(() => {
+    fetch("/api/desktop-window-state", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        state: normalizedState,
+        view,
+        width: 540,
+        height: 820,
+      }),
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        appendDesktopBridgeLog(
+          payload?.ok ? "bridge" : "warning",
+          payload?.ok
+            ? "Local desktop window fallback applied."
+            : "Local desktop window fallback did not apply.",
+          payload
+        );
+      })
+      .catch((error) => {
+        appendDesktopBridgeLog("error", "Local desktop window fallback failed.", {
+          message: error?.message ?? String(error),
+        });
+      });
+  }, 260);
+
+  return true;
+}
+
 export function requestDesktopWindowState(state, view = "dialer") {
-  return postDesktopHostMessage({
-    type: "shellWindowState",
-    state,
-    view,
-  });
+  const messages = buildDesktopWindowStateMessages(state, view);
+  const sent = postDesktopHostMessages(messages);
+  requestLocalDesktopWindowState(state, view);
+
+  if (typeof window !== "undefined") {
+    [80, 180, 360, 700, 1200, 2000].forEach((delay) => {
+      window.setTimeout(() => {
+        postDesktopHostMessages(messages);
+      }, delay);
+    });
+  }
+
+  return sent;
+}
+
+export function rememberDesktopWindowState(state, view = "dialer") {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.sessionStorage.setItem(
+      "voiceiqDesktopWindowState",
+      JSON.stringify({
+        state,
+        view,
+        requestedAt: Date.now(),
+      })
+    );
+  } catch {
+    // Non-critical; direct host messaging still runs.
+  }
+}
+
+export function applyRememberedDesktopWindowState(maxAgeMs = 10000) {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem("voiceiqDesktopWindowState");
+    if (!raw) {
+      return false;
+    }
+
+    const request = JSON.parse(raw);
+    if (!request?.state || Date.now() - Number(request.requestedAt || 0) > maxAgeMs) {
+      window.sessionStorage.removeItem("voiceiqDesktopWindowState");
+      return false;
+    }
+
+    requestDesktopWindowState(request.state, request.view || "dialer");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function navigateWithDesktopWindowState({
+  href,
+  router,
+  state,
+  view = "dialer",
+  delayMs = 180,
+}) {
+  rememberDesktopWindowState(state, view);
+  requestDesktopWindowState(state, view);
+
+  if (typeof window === "undefined") {
+    router?.push?.(href);
+    return;
+  }
+
+  window.setTimeout(() => {
+    if (router?.push) {
+      router.push(href);
+      return;
+    }
+
+    window.location.href = href;
+  }, delayMs);
 }
